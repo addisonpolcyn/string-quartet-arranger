@@ -24,6 +24,7 @@ SOUNDFONTS = ["/usr/share/sounds/sf2/FluidR3_GM.sf2", "/usr/share/soundfonts/Flu
 
 
 LEVELS = ["pp", "p", "mp", "mf", "f"]
+COUNTER_VELOCITY = 0.35  # marks violin II's answers to the tune: written a level under its chords
 SOFTER = {"vln2": 1, "vla": 1}  # the accompaniment sits a dynamic level under the tune and bass
 
 
@@ -224,6 +225,18 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 for a, peak, b in phrase_arcs(notes, busy):
                     part.insert(0, dynamics.Crescendo(placed[a][1], placed[peak][1]))
                     part.insert(0, dynamics.Diminuendo(placed[peak][1], placed[b][1]))
+        if k == "vln2":  # the answers to the tune sit a level under violin II's chords
+            soft = [abs(n.velocity - COUNTER_VELOCITY) < 1e-6 for n in parts[k]]
+            for i, n in enumerate(parts[k]):
+                if not soft[i] or (i and soft[i - 1]):
+                    continue
+                j = i
+                while j + 1 < len(soft) and soft[j + 1]:
+                    j += 1
+                lv = level_at(plan, k, n.start) if plan else LEVELS.index(DYNAMICS[k])
+                part.insert(n.start, dynamics.Dynamic(LEVELS[max(0, lv - 1)]))
+                if j + 1 < len(soft):
+                    part.insert(parts[k][j + 1].start, dynamics.Dynamic(LEVELS[lv]))
         if accents and k in ("vln2", "vla"):
             for n, (_, m) in zip(parts[k], placed):
                 if n.end - n.start <= 1 and n.start % 2 == 1:  # beats 2 and 4
@@ -253,13 +266,14 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 
 # Muse Sounds solo players by part (Muse Strings ids). MuseScore gives every violin part the same
 # player, so the two violins would play identical samples; a project file can pick each one.
-# The last value is where each sits, -1 = far left: the usual quartet half circle (the cello
-# nearer the middle, as the bass carries the most energy).
+# Then where each sits (-1 = far left: the usual quartet half circle, the cello nearer the middle
+# as the bass carries the most energy) and its fader in dB: Muse Strings' cello sounds ~7 dB
+# louder than its violin at the same dynamic, so the cello comes down and the tune up, ~3 dB on top.
 MUSE_SOLOISTS = [
-    ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5),
-    ("violin", "104", "Violin 2 (Solo)", "strings.violin.orchestral:secondary", -0.2),
-    ("viola", "105", "Viola (Solo)", "strings.viola.orchestral", 0.2),
-    ("violoncello", "106", "Violoncello (Solo)", "strings.violoncello.orchestral", 0.3),
+    ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5, 8.0),
+    ("violin", "104", "Violin 2 (Solo)", "strings.violin.orchestral:secondary", -0.2, 0.0),
+    ("viola", "105", "Viola (Solo)", "strings.viola.orchestral", 0.2, 0.0),
+    ("violoncello", "106", "Violoncello (Solo)", "strings.violoncello.orchestral", 0.3, -4.0),
 ]
 
 
@@ -288,9 +302,9 @@ def prepare_project(mscz: Path) -> None:
             "hasNativeEditorSupport": False, "id": uid, "type": "muse_sampler_sound_pack",
             "vendor": "MuseSounds"}, "unitConfiguration": {}},
         "instrumentId": instrument, "partId": str(i + 1),
-        "out": {"balance": pan, "fxChain": {}, "volumeDb": 0},
+        "out": {"balance": pan, "fxChain": {}, "volumeDb": fader},
         "soloMuteState": {"mute": False, "solo": False},
-    } for i, (instrument, uid, name, setup, pan) in enumerate(MUSE_SOLOISTS)]
+    } for i, (instrument, uid, name, setup, pan, fader) in enumerate(MUSE_SOLOISTS)]
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
     with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():

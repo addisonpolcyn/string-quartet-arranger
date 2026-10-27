@@ -10,7 +10,7 @@ from collections import defaultdict
 
 import numpy as np
 
-from .export import LEVELS, NAMES, detect_key
+from .export import COUNTER_VELOCITY, LEVELS, NAMES, detect_key
 from .transcribe import Note
 
 # Comfortable MIDI ranges (lo, hi) and a "sweet spot" centre for octave fitting.
@@ -515,7 +515,7 @@ def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scal
             continue
         mid = float(np.median([n.pitch for n in phrase]))
         shift = 12 * round((73 - mid) / 12)  # centre the answer around C#5, near the tune
-        phrase = [Note(n.start, n.end, n.pitch + shift, n.velocity) for n in phrase]
+        phrase = [Note(n.start, n.end, n.pitch + shift, COUNTER_VELOCITY) for n in phrase]
         if min(n.pitch for n in phrase) < lo or max(n.pitch for n in phrase) > hi:
             continue
         out = [n if n.end <= s or n.start >= e else Note(n.start, s, n.pitch, n.velocity)
@@ -685,5 +685,5 @@ def chord_report(parts: dict[str, list[Note]], labels: list[Chord | None], slot:
         complete += chord[0] in heard and (chord[0] + CHORDS[chord[1]][1]) % 12 in heard
         clean += all(pc in chord_tones(chord) for p in ("vln2", "vla", "vc") for pc in sounding[p])
     if named:
-        print(f"[chords] {named} beats with a chord: root+3rd sounding in {complete / named:.0%}, "
-              f"accompaniment all chord tones in {clean / named:.0%}")
+        print(f"[chords] {named * slot:.0f} beats with a chord: root+3rd sounding in "
+              f"{complete / named:.0%}, accompaniment all chord tones in {clean / named:.0%}")
