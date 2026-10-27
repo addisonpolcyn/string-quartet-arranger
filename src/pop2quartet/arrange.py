@@ -15,7 +15,7 @@ from .transcribe import Note
 
 # Comfortable MIDI ranges (lo, hi) and a "sweet spot" centre for octave fitting.
 RANGES = {
-    "vln1": (55, 93, 74),  # G3-A6
+    "vln1": (55, 93, 72),  # G3-A6
     "vln2": (55, 84, 67),  # G3-C6
     "vla": (48, 76, 60),   # C3-E5
     "vc": (36, 67, 48),    # C2-G4
@@ -84,13 +84,25 @@ def monophonic(notes: list[Note], pick, legato_gap: float = 0.0) -> list[Note]:
     return out
 
 
+SHRILL = {"vln1": 86}  # D6: sustained above this a violin turns thin and piercing
+
+
 def fit_range(notes: list[Note], part: str, shift: int | None = None) -> list[Note]:
-    """Transpose by whole octaves to best fit the instrument, then fold stragglers in."""
+    """Transpose by whole octaves to best fit the instrument, then fold stragglers in. For the tune
+    (parts in SHRILL) the octave weighs notes out of range (cheap: they fold in), time in the
+    shrill top register and distance from the sweet spot, so a few low notes can't push the whole
+    tune up an octave; other parts take the octave with the most notes in range."""
     lo, hi, centre = RANGES[part]
     if not notes:
         return []
     pitches = np.array([n.pitch for n in notes])
-    if shift is None:
+    if shift is None and part in SHRILL:
+        def cost(k):
+            p = pitches + 12 * k
+            return (3 * np.mean((p < lo) | (p > hi)) + 3 * np.mean(p >= SHRILL[part])
+                    + abs(np.median(p) - centre) / 12)
+        shift = min(range(-3, 4), key=cost)
+    elif shift is None:
         def score(k):
             p = pitches + 12 * k
             return (np.mean((p >= lo) & (p <= hi)), -abs(np.median(p) - centre))
@@ -570,6 +582,22 @@ def hold(notes: list[Note], max_gap: float, chords=None, slot: float = 1.0) -> l
     return out
 
 
+def cap_repeats(notes: list[Note], min_gap: float) -> tuple[list[Note], int]:
+    """Merge a same-pitch re-attack that comes less than `min_gap` beats after the previous one
+    into it. Samples repeat note-for-note identically (a "machine gun"), and no player re-bows
+    that fast; this matters most when the tempo was read at double speed."""
+    out: list[Note] = []
+    merged = 0
+    for n in notes:
+        p = out[-1] if out else None
+        if p and p.pitch == n.pitch and abs(p.end - n.start) < 1e-6 and n.start - p.start < min_gap:
+            out[-1] = Note(p.start, n.end, p.pitch, p.velocity)
+            merged += 1
+        else:
+            out.append(n)
+    return out, merged
+
+
 def merge_repeats(notes: list[Note]) -> list[Note]:
     """Tie consecutive identical pitches into one sustained note."""
     out = []
@@ -595,7 +623,7 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
-            leap=0.0, root_fill=False, counter=False):
+            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
     transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
@@ -665,6 +693,11 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     if counter:
         vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale)
         print(f"[arrange] violin II answers the tune with the band's hook {answers} times")
+    if repeat_gap:
+        melody, a = cap_repeats(melody, repeat_gap)
+        vln2, b = cap_repeats(vln2, repeat_gap)
+        vla, c = cap_repeats(vla, repeat_gap)
+        print(f"[arrange] merged {a + b + c} same-note repeats faster than {repeat_gap:.2f} beats")
     parts = {"vln1": melody, "vln2": vln2, "vla": vla, "vc": cello}
     chord_report(parts, labels, harmony_slot)
     changes = [(k * harmony_slot, c) for k, c in enumerate(labels)

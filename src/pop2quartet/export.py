@@ -268,9 +268,9 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 # player, so the two violins would play identical samples; a project file can pick each one.
 # Then where each sits (-1 = far left: the usual quartet half circle, the cello nearer the middle
 # as the bass carries the most energy) and its fader in dB: Muse Strings' cello sounds ~7 dB
-# louder than its violin at the same dynamic, so the cello comes down and the tune up, ~3 dB on top.
+# louder than its violin at the same dynamic, so the cello comes down and the tune up, ~1.5 dB on top.
 MUSE_SOLOISTS = [
-    ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5, 8.0),
+    ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5, 6.5),
     ("violin", "104", "Violin 2 (Solo)", "strings.violin.orchestral:secondary", -0.2, 0.0),
     ("viola", "105", "Viola (Solo)", "strings.viola.orchestral", 0.2, 0.0),
     ("violoncello", "106", "Violoncello (Solo)", "strings.violoncello.orchestral", 0.3, -4.0),

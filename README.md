@@ -96,6 +96,7 @@ different arrangement options takes seconds.
 | `--root-fill` / `--no-root-fill` | on | where the bass is silent but the band plays chords, the cello plays the chord root (songs with no bass line, bass-less breakdowns) |
 | `--expression` / `--no-expression` | on | slurs over connected notes (one bow), pizzicato inner voices in the quietest verses, a swell to the top of each sung phrase |
 | `--room` | auto | reverb for the preview: `studio` (only the samples' own room), `hall` (~1.8 s), `church` (~3.2 s); `auto` picks by how much of the song has drums: church under 30% (ballads), hall under 45%, studio above |
+| `--max-repeat` | 0.3 | fastest same-note re-attack in seconds; quicker repeats merge into one note (samples repeat identically, a "machine gun"; 0 = off) |
 | `--lift` / `--no-lift` | on | the last loudest section: violin II doubles the tune an octave below |
 | `--counter` / `--no-counter` | on | where the singer rests, violin II answers with the band's own hook |
 | `--ending` / `--no-ending` | on | a 2-bar ritardando into a held final chord under a fermata |

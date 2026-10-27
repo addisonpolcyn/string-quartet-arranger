@@ -53,7 +53,9 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             pattern=drum_pattern(stems["drums"], beat_times, offset),
                             repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None,
                             sung=sung_line(stems["vocals"], to_sec) if args.melody == "best" else None,
-                            leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter)
+                            leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter,
+                            repeat_gap=args.max_repeat * float(np.median(np.diff(beat_times))) ** -1
+                            if args.max_repeat else 0.0)
     if args.lift:
         parts, start = lift_last_chorus(parts, plan)
         if verbose and start >= 0:
@@ -121,6 +123,9 @@ def main() -> None:
     ap.add_argument("--room", choices=["auto", *ROOMS], default="auto",
                     help="reverb for the preview: studio (only the samples' own room), hall (~1.8 s), "
                          "church (~3.2 s), or auto = by how much the drums play (ballads: church)")
+    ap.add_argument("--max-repeat", type=float, default=0.3,
+                    help="fastest same-note re-attack, in seconds: quicker repeats merge into one "
+                         "note, as samples repeat identically (0 = off)")
     ap.add_argument("--lift", action=argparse.BooleanOptionalAction, default=True,
                     help="last loudest section: violin II doubles the tune an octave below")
     ap.add_argument("--counter", action=argparse.BooleanOptionalAction, default=True,
