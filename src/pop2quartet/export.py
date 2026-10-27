@@ -8,6 +8,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import numpy as np
+
 from .transcribe import Note
 
 PARTS = [  # key, display name, GM program, clef
@@ -139,12 +141,17 @@ def phrase_arcs(notes: list[Note], busy: list[tuple[float, float]], breath: floa
 
 
 def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: str,
-                   chords=(), plan=None, expression: bool = True) -> str:
+                   chords=(), plan=None, expression: bool = True, ending: bool = False,
+                   accents: bool = False, rubato: bool = False) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
-    `expression`: slurs, pizzicato verses for the inner voices, and a swell over each sung phrase."""
-    from music21 import (clef, dynamics, expressions, harmony, instrument, metadata, meter, note,
-                         spanner, stream, tempo)
+    `expression`: slurs, pizzicato verses for the inner voices, and a swell over each sung phrase.
+    `ending`: everyone holds the last chord together, under a fermata, after a 2-bar ritardando.
+    `accents`: the inner voices lean on the backbeat (2 and 4) and play quick notes short.
+    `rubato` (for the audio preview; it fills the score with tempo marks): the tempo gives a
+    little at the end of each sung phrase, as players breathe."""
+    from music21 import (articulations, clef, dynamics, expressions, harmony, instrument, metadata,
+                         meter, note, spanner, stream, tempo)
     from music21 import key as m21key
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
@@ -153,6 +160,14 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 
     total = max((n.end for ns in parts.values() for n in ns), default=4.0)
     total = 4.0 * -(-total // 4)  # round up to a whole bar
+    if ending:  # last notes that end in the final 2 bars ring on to the end, together
+        parts = {k: ns[:-1] + [Note(ns[-1].start, total, ns[-1].pitch, ns[-1].velocity)]
+                 if ns and ns[-1].end >= total - 8 else ns for k, ns in parts.items()}
+
+    def hidden_tempo(factor: float):
+        mark = tempo.MetronomeMark(number=round(bpm * factor))
+        mark.style.hideObjectOnPrint = True
+        return mark
 
     detected = m21key.Key(*detect_key(parts))
     use_flats = detected.sharps < 0
@@ -209,6 +224,25 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 for a, peak, b in phrase_arcs(notes, busy):
                     part.insert(0, dynamics.Crescendo(placed[a][1], placed[peak][1]))
                     part.insert(0, dynamics.Diminuendo(placed[peak][1], placed[b][1]))
+        if accents and k in ("vln2", "vla"):
+            for n, (_, m) in zip(parts[k], placed):
+                if n.end - n.start <= 1 and n.start % 2 == 1:  # beats 2 and 4
+                    m.articulations.append(articulations.Accent())
+                elif n.end - n.start <= 0.5:
+                    m.articulations.append(articulations.Staccato())
+        if k == "vln1" and rubato:  # a breath at each phrase end, a tempo again on the next note
+            notes = parts[k]
+            for a, peak, b in phrase_arcs(notes, []):
+                if notes[b].end < total - 8:
+                    part.insert(notes[b].start, hidden_tempo(0.94))
+                    part.insert(notes[b].end, hidden_tempo(1.0))
+        if ending:
+            if placed:
+                placed[-1][1].expressions.append(expressions.Fermata())
+            if k == "vln1":
+                part.insert(total - 8, expressions.TextExpression("rit."))
+                for i in range(1, 8):  # one step per beat, down to ~70% of the tempo
+                    part.insert(total - 8 + i, hidden_tempo(1 - 0.043 * i))
         part.makeRests(refStreamOrTimeRange=[0.0, total], fillGaps=True, inPlace=True)
         part = part.makeMeasures()
         part.makeTies(inPlace=True)
@@ -306,16 +340,55 @@ def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
 
 
 ROOMS = {"studio": None, "hall": (1.8, 0.22), "church": (3.2, 0.32)}  # (seconds to fade 60 dB, wet share)
-ROOM_TEMPOS = [(80, "church"), (110, "hall")]  # slower than this BPM -> this room, else studio
+ROOM_DRUMS = [(0.30, "church"), (0.45, "hall")]  # drums play less of the song -> this room
 
 
-def room_for(bpm: float) -> str:
-    """Ballads ring in a church, mid-tempo songs in a hall; fast ones stay close (studio), as long
-    reverb blurs quick notes and softens the groove."""
-    return next((room for limit, room in ROOM_TEMPOS if bpm < limit), "studio")
+def room_for(drums_active: float) -> str:
+    """Ballads (few or no drums) ring in a church, sparse grooves in a hall, and drum-driven songs
+    stay close (studio), as long reverb blurs the groove. Drums are a better guide than the tempo,
+    which trackers often read at double (a ballad's hi-hat eighths)."""
+    return next((room for limit, room in ROOM_DRUMS if drums_active < limit), "studio")
 
 
-def add_room(wav: Path, room: str = "studio", level_db: float = -20.0) -> None:
+def _biquad(kind: str, f0: float, gain_db: float, q: float, sr: int):
+    """RBJ cookbook EQ: a peaking bell or a high shelf, as (b, a) filter coefficients."""
+    A, w = 10 ** (gain_db / 40), 2 * np.pi * f0 / sr
+    alpha = np.sin(w) / (2 * q)
+    cw = np.cos(w)
+    if kind == "peak":
+        b = [1 + alpha * A, -2 * cw, 1 - alpha * A]
+        a = [1 + alpha / A, -2 * cw, 1 - alpha / A]
+    else:  # high shelf
+        sa = 2 * np.sqrt(A) * alpha
+        b = [A * ((A + 1) + (A - 1) * cw + sa), -2 * A * ((A - 1) + (A + 1) * cw),
+             A * ((A + 1) + (A - 1) * cw - sa)]
+        a = [(A + 1) - (A - 1) * cw + sa, 2 * ((A - 1) - (A + 1) * cw), (A + 1) - (A - 1) * cw - sa]
+    return np.array(b) / a[0], np.array(a) / a[0]
+
+
+def ride_level(y: np.ndarray, sr: int, ratio: float = 3.0, window: float = 1.0,
+               max_boost: float = 8.0) -> np.ndarray:
+    """Even out the loudness like a mixing engineer riding the faders: the gap between the
+    smoothed loudness and the song's typical level shrinks by `ratio`. Muse Sounds takes each
+    dynamic mark and every entry of a voice at face value, so the quartet swings ~3x as far as
+    the recording. Offline, so the gain eases in around a change instead of lagging it, and
+    near-silence (breaks, the very start and end) is never pulled up."""
+    hop = int(0.1 * sr)
+    frames = np.sqrt(np.add.reduceat((y ** 2).mean(axis=1), np.arange(0, len(y), hop))
+                     / np.diff(np.append(np.arange(0, len(y), hop), len(y))))
+    db = 20 * np.log10(frames + 1e-9)
+    k = max(1, int(window / 0.1))
+    smooth = np.convolve(db, np.ones(k) / k, mode="same")
+    typical = np.median(smooth[smooth > smooth.max() - 30])
+    gain = (typical - smooth) * (1 - 1 / ratio)
+    gain = np.clip(gain, -12, max_boost)
+    gain[smooth < typical - 30] = 0.0  # leave real breaks and fades alone
+    gain = np.convolve(gain, np.ones(k) / k, mode="same")  # ease every change in
+    t = np.arange(len(gain)) * hop + hop / 2
+    return y * 10 ** (np.interp(np.arange(len(y)), t, gain) / 20)[:, None]
+
+
+def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
     noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95)."""
     import numpy as np
@@ -336,6 +409,14 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0) -> None:
         room_y = np.stack([fftconvolve(y[:, c], ir[:, c])[:len(y)] for c in range(2)], axis=1)
         room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
         out = (1 - wet) * y + wet * room_y
+    out = ride_level(out, sr)
+    if master:  # less low-mid boxiness, a touch of air, and 2 dB louder with peaks rounded off
+        for kind, f0, g, q in (("peak", 300, -2.5, 0.9), ("shelf", 9000, 2.0, 0.7)):
+            out = lfilter(*_biquad(kind, f0, g, q, sr), out, axis=0)
+        out *= 10 ** ((level_db + 2) / 20) / max(np.sqrt((out ** 2).mean()), 1e-9)
+        out = np.where(np.abs(out) > 0.8, np.sign(out) * (0.8 + 0.19 * np.tanh((np.abs(out) - 0.8) / 0.19)), out)
+        sf.write(str(wav), out, sr)
+        return
     rms = np.sqrt((out ** 2).mean())
     gain = min(10 ** (level_db / 20) / max(rms, 1e-9), 0.95 / max(np.abs(out).max(), 1e-9))
     sf.write(str(wav), out * gain, sr)

@@ -8,12 +8,12 @@ from pathlib import Path
 
 import numpy as np
 
-from .arrange import LEVELS, arrange, bar_phase, dynamics_plan
+from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, lift_last_chorus
 from .export import ROOMS, add_room, render_audio, room_for, write_midi, write_musicxml
 from .quality import WEIGHTS, evaluate
 from .separate import separate
-from .transcribe import (Note, beat_loudness, chroma_repair, drum_pattern, refine_pitch,
-                         sung_line, to_beats, track_beats, transcribe)
+from .transcribe import (Note, beat_loudness, chroma_repair, drum_activity, drum_pattern,
+                         refine_pitch, sung_line, to_beats, track_beats, transcribe)
 
 
 def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
@@ -53,7 +53,11 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             pattern=drum_pattern(stems["drums"], beat_times, offset),
                             repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None,
                             sung=sung_line(stems["vocals"], to_sec) if args.melody == "best" else None,
-                            leap=args.leap_cost, root_fill=args.root_fill)
+                            leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter)
+    if args.lift:
+        parts, start = lift_last_chorus(parts, plan)
+        if verbose and start >= 0:
+            print(f"[arrange] last chorus lift from bar {int(start // 4) + 1}: violin II doubles the tune")
     return {"parts": parts, "chords": chords, "plan": plan, "tempo": tempo, "to_sec": to_sec}
 
 
@@ -116,7 +120,19 @@ def main() -> None:
                          "each sung phrase")
     ap.add_argument("--room", choices=["auto", *ROOMS], default="auto",
                     help="reverb for the preview: studio (only the samples' own room), hall (~1.8 s), "
-                         "church (~3.2 s), or auto = by tempo (church under 80 BPM, hall under 110)")
+                         "church (~3.2 s), or auto = by how much the drums play (ballads: church)")
+    ap.add_argument("--lift", action=argparse.BooleanOptionalAction, default=True,
+                    help="last loudest section: violin II doubles the tune an octave below")
+    ap.add_argument("--counter", action=argparse.BooleanOptionalAction, default=True,
+                    help="violin II answers the tune with the band's hook where the singer rests")
+    ap.add_argument("--ending", action=argparse.BooleanOptionalAction, default=True,
+                    help="a 2-bar ritardando into a held final chord under a fermata")
+    ap.add_argument("--accents", action=argparse.BooleanOptionalAction, default=True,
+                    help="inner voices accent the backbeat (2 and 4) and play quick notes short")
+    ap.add_argument("--rubato", action=argparse.BooleanOptionalAction, default=True,
+                    help="preview only: the tempo gives a little at the end of each sung phrase")
+    ap.add_argument("--master", action=argparse.BooleanOptionalAction, default=True,
+                    help="preview only: EQ (less low-mid mud, more air) and a louder, limited level")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -169,18 +185,19 @@ def main() -> None:
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
     key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
-                         args.expression)
+                         args.expression, args.ending, args.accents)
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
         # MuseScore plays chord symbols on a piano, so the preview gets a copy without them
         bare = out / ".preview.musicxml"
-        write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression)
+        write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
+                       args.accents, args.rubato)
         how = render_audio(bare, midi, out / "preview.wav")
         bare.unlink()
         if how:
-            room = room_for(tempo) if args.room == "auto" else args.room
-            add_room(out / "preview.wav", room)
+            room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
+            add_room(out / "preview.wav", room, master=args.master)
             print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room)")
 
 

@@ -480,6 +480,51 @@ def fill_roots(cello: list[Note], labels: list[Chord | None], band: list[Note],
     return sorted(cello + added, key=lambda n: n.start), len(added)
 
 
+def lift_last_chorus(parts: dict[str, list[Note]], plan) -> tuple[dict[str, list[Note]], float]:
+    """The climax: through the song's last loudest section, violin II leaves its chords to play the
+    tune an octave below violin I (where that fits its range; it keeps its chords in the tune's
+    rests). Returns the new parts and the beat the lift starts (or -1 if there's no plan)."""
+    if not plan:
+        return parts, -1.0
+    top = max(lv for _, lv in plan)
+    k = max(i for i, (_, lv) in enumerate(plan) if lv == top)
+    start = plan[k][0]
+    end = plan[k + 1][0] if k + 1 < len(plan) else float("inf")
+    lo = RANGES["vln2"][0]
+    tune = [n for n in parts["vln1"] if start <= n.start < end]
+    double = [Note(n.start, n.end, n.pitch - 12, n.velocity) for n in tune if n.pitch - 12 >= lo]
+    keep = [n for n in parts["vln2"] if not (start <= n.start < end)
+            or not any(t.start < n.end and t.end > n.start for t in double)]
+    return {**parts, "vln2": sorted(keep + double, key=lambda n: n.start)}, start
+
+
+def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scale: set[int],
+                  min_gap: float = 2.0, min_notes: int = 3) -> tuple[list[Note], int]:
+    """Where the singer rests at least `min_gap` beats, violin II answers with the band's own hook
+    from that moment (in key, notes of half a beat or more, moved into violin II's upper range)
+    instead of holding chords. Returns violin II's new line and how many answers it plays."""
+    lo, hi, _ = RANGES["vln2"]
+    out, answers = list(inner), 0
+    for a, b in zip(melody, melody[1:]):
+        s, e = a.end, b.start
+        if e - s < min_gap:
+            continue
+        phrase = [n for n in hooks if s <= n.start and n.end <= e
+                  and n.pitch % 12 in scale and n.end - n.start >= 0.5]
+        if len(phrase) < min_notes:
+            continue
+        mid = float(np.median([n.pitch for n in phrase]))
+        shift = 12 * round((73 - mid) / 12)  # centre the answer around C#5, near the tune
+        phrase = [Note(n.start, n.end, n.pitch + shift, n.velocity) for n in phrase]
+        if min(n.pitch for n in phrase) < lo or max(n.pitch for n in phrase) > hi:
+            continue
+        out = [n if n.end <= s or n.start >= e else Note(n.start, s, n.pitch, n.velocity)
+               for n in out if not s <= n.start < e]
+        out = [n for n in out if n.end > n.start] + phrase
+        answers += 1
+    return sorted(out, key=lambda n: n.start), answers
+
+
 def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
     """Undo octave errors: a leap of more than an octave goes to the nearest octave instead."""
     lo, hi, _ = RANGES[part]
@@ -550,7 +595,7 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
-            leap=0.0, root_fill=False):
+            leap=0.0, root_fill=False, counter=False):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
     transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
@@ -617,6 +662,9 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
         skip = solo if inner_style == "auto" else None
         vln2, vla = groove(vln2, pattern, skip, harmony_slot), groove(vla, pattern, skip, harmony_slot)
 
+    if counter:
+        vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale)
+        print(f"[arrange] violin II answers the tune with the band's hook {answers} times")
     parts = {"vln1": melody, "vln2": vln2, "vla": vla, "vc": cello}
     chord_report(parts, labels, harmony_slot)
     changes = [(k * harmony_slot, c) for k, c in enumerate(labels)

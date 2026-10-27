@@ -247,6 +247,14 @@ def steady_beats(y: np.ndarray, sr: int, beats: np.ndarray, tolerance: float = 0
     return steady if even <= tracked else None
 
 
+def drum_activity(drums: Path, threshold: float = 0.02) -> float:
+    """Share of the song (in seconds) where the drum stem is clearly playing."""
+    import librosa
+
+    y, sr = librosa.load(str(drums), sr=11025, mono=True)
+    return float(np.mean(librosa.feature.rms(y=y, hop_length=sr)[0] > threshold))
+
+
 @lru_cache(maxsize=2)
 def _power(mix: Path) -> tuple[np.ndarray, np.ndarray]:
     import librosa

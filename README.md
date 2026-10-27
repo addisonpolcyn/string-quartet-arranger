@@ -95,7 +95,13 @@ different arrangement options takes seconds.
 | `--leap-cost` | 0.15 | best melody: extra cost per semitone jumped between notes, so pitch slips of a 4th, 5th or octave lose to stepwise motion (0 = off) |
 | `--root-fill` / `--no-root-fill` | on | where the bass is silent but the band plays chords, the cello plays the chord root (songs with no bass line, bass-less breakdowns) |
 | `--expression` / `--no-expression` | on | slurs over connected notes (one bow), pizzicato inner voices in the quietest verses, a swell to the top of each sung phrase |
-| `--room` | auto | reverb for the preview: `studio` (only the samples' own room), `hall` (~1.8 s), `church` (~3.2 s); `auto` picks by tempo: church under 80 BPM, hall under 110, studio above |
+| `--room` | auto | reverb for the preview: `studio` (only the samples' own room), `hall` (~1.8 s), `church` (~3.2 s); `auto` picks by how much of the song has drums: church under 30% (ballads), hall under 45%, studio above |
+| `--lift` / `--no-lift` | on | the last loudest section: violin II doubles the tune an octave below |
+| `--counter` / `--no-counter` | on | where the singer rests, violin II answers with the band's own hook |
+| `--ending` / `--no-ending` | on | a 2-bar ritardando into a held final chord under a fermata |
+| `--accents` / `--no-accents` | on | inner voices accent the backbeat (2 and 4) and play quick notes short |
+| `--rubato` / `--no-rubato` | on | preview only: the tempo gives a little at the end of each sung phrase |
+| `--master` / `--no-master` | on | preview only: EQ (less low-mid mud, a touch of air) and a louder, limited level |
 | `--auto` / `--no-auto` | on | try the tempo as detected, half and double, grid 0.25/0.5 and harmony slot 1/2 (any you set yourself stay fixed), score each arrangement and keep the best |
 | `--grid` | auto (0.25) | rhythmic quantization in beats (0.5 = simpler, eighth-note rhythms) |
 | `--harmony-slot` | auto (1) | how often the inner voices may change chord; they hold notes while the harmony allows |
