@@ -10,7 +10,7 @@ import numpy as np
 
 from .arrange import CHORDS
 from .export import NAMES, detect_key
-from .transcribe import Note
+from .transcribe import Note, sung_onsets
 
 WEIGHTS = {"rubs": 1.0, "out_of_key": 1.0, "incomplete": 0.5, "flicker": 0.3, "leaps": 1.0,
            "tempo": 0.5, "rhythm": 1.0}
@@ -25,18 +25,6 @@ def song_chroma(mix: Path) -> tuple[np.ndarray, np.ndarray]:
     y, sr = librosa.load(str(mix), sr=22050, mono=True)
     chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=2048)
     return librosa.times_like(chroma, sr=sr, hop_length=2048), chroma
-
-
-@lru_cache(maxsize=2)
-def sung_onsets(vocals: Path) -> np.ndarray:
-    """Times (s) where the singer starts a note, ignoring quiet bleed in the vocal stem."""
-    import librosa
-
-    y, sr = librosa.load(str(vocals), sr=22050, mono=True)
-    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time")
-    rms = librosa.feature.rms(y=y)[0]
-    rms_times = librosa.times_like(rms, sr=sr)
-    return np.array([t for t in onsets if rms[min(len(rms) - 1, np.searchsorted(rms_times, t))] > 0.02])
 
 
 def fidelity(parts: dict[str, list[Note]], to_sec, mix: Path, window: float = 0.5) -> float:

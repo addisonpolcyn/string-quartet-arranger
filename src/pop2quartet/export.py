@@ -1,6 +1,11 @@
 """Stage 4: write the quartet as MusicXML (sheet music), MIDI, and a rough audio preview."""
+import contextlib
+import json
+import re
 import shutil
 import subprocess
+import tempfile
+import zipfile
 from pathlib import Path
 
 from .transcribe import Note
@@ -76,11 +81,70 @@ SUFFIX = {"major": "", "minor": "m", "maj7": "maj7", "7": "7", "m7": "m7"}
 FLAT_NAMES = ["C", "D-", "D", "E-", "E", "F", "G-", "G", "A-", "A", "B-", "B"]
 
 
+BOW = 4.0  # longest slur, in beats: what one bow stroke comfortably carries
+
+
+def slur_groups(notes: list[Note], skip=frozenset()) -> list[list[int]]:
+    """Note indices to play under one bow: connected notes (no rest between), at most BOW beats,
+    broken before a repeated pitch (a re-attack needs a new bow) and around plucked notes."""
+    groups, run = [], []
+    for i, n in enumerate(notes):
+        prev = notes[run[-1]] if run else None
+        if i in skip or (prev and (abs(prev.end - n.start) > 1e-6 or prev.pitch == n.pitch
+                                   or n.end - notes[run[0]].start > BOW)):
+            groups.append(run)
+            run = []
+        if i not in skip:
+            run.append(i)
+    groups.append(run)
+    return [g for g in groups if len(g) >= 2]
+
+
+def pizz_notes(notes: list[Note], plan, short: float = 1.0, share: float = 0.7) -> set[int]:
+    """Accompaniment notes to pluck: in the song's quietest dynamic sections, where the part is
+    mostly rhythm (short re-strikes), pizzicato sets the verse apart from the bowed chorus."""
+    if not plan:
+        return set()
+    quiet = min(lv for _, lv in plan)
+    ends = [s for s, _ in plan[1:]] + [float("inf")]
+    out: set[int] = set()
+    for (start, lv), end in zip(plan, ends):
+        idx = [i for i, n in enumerate(notes) if start <= n.start < end]
+        if lv == quiet and idx and sum(notes[i].end - notes[i].start <= short for i in idx) >= share * len(idx):
+            out.update(idx)
+    return out
+
+
+def phrase_arcs(notes: list[Note], busy: list[tuple[float, float]], breath: float = 0.5,
+                landing: float = 1.5, min_len: float = 3.0) -> list[tuple[int, int, int]]:
+    """(first, peak, last) note indices per sung phrase, for a swell up to the phrase's highest
+    note and back. A phrase ends at a breath (a rest of `breath` beats) or on a note held for
+    `landing` beats. Phrases under `min_len` beats, or overlapping a section hairpin (`busy`
+    beat spans), stay flat."""
+    arcs, start = [], 0
+    for i in range(1, len(notes) + 1):
+        if (i < len(notes) and notes[i].start - notes[i - 1].end < breath
+                and notes[i - 1].end - notes[i - 1].start < landing):
+            continue
+        a, b = start, i - 1
+        start = i
+        if b - a < 2 or notes[b].end - notes[a].start < min_len:
+            continue
+        if any(notes[a].start < e and notes[b].end > s for s, e in busy):
+            continue
+        peak = max(range(a, b + 1), key=lambda k: notes[k].pitch)
+        if a < peak < b:
+            arcs.append((a, peak, b))
+    return arcs
+
+
 def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: str,
-                   chords=(), plan=None) -> str:
+                   chords=(), plan=None, expression: bool = True) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
-    `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them."""
-    from music21 import clef, dynamics, harmony, instrument, metadata, meter, note, stream, tempo
+    `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
+    `expression`: slurs, pizzicato verses for the inner voices, and a swell over each sung phrase."""
+    from music21 import (clef, dynamics, expressions, harmony, instrument, metadata, meter, note,
+                         spanner, stream, tempo)
     from music21 import key as m21key
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
@@ -122,6 +186,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 m.pitch = m.pitch.getEnharmonic()
             part.insert(n.start, m)
             placed.append((n.start, m))
+        busy = []  # beat spans of the section hairpins
         if plan:
             for (s0, _), (s1, _) in zip(plan, plan[1:]):
                 a, b = level_at(plan, k, s0), level_at(plan, k, s1)
@@ -129,12 +194,86 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 if a != b and len(span) >= 2:
                     wedge = dynamics.Crescendo if b > a else dynamics.Diminuendo
                     part.insert(0, wedge(span[0], span[-1]))
+                    busy.append((max(s0, s1 - 8), s1))
+        if expression:
+            notes = parts[k]
+            plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") else set()
+            for i in sorted(plucked):  # mark where plucking starts and where the bow returns
+                if i - 1 not in plucked:
+                    part.insert(notes[i].start, expressions.TextExpression("pizz."))
+                if i + 1 < len(notes) and i + 1 not in plucked:
+                    part.insert(notes[i + 1].start, expressions.TextExpression("arco"))
+            for g in slur_groups(notes, plucked):
+                part.insert(0, spanner.Slur([placed[i][1] for i in g]))
+            if k == "vln1":
+                for a, peak, b in phrase_arcs(notes, busy):
+                    part.insert(0, dynamics.Crescendo(placed[a][1], placed[peak][1]))
+                    part.insert(0, dynamics.Diminuendo(placed[peak][1], placed[b][1]))
         part.makeRests(refStreamOrTimeRange=[0.0, total], fillGaps=True, inPlace=True)
         part = part.makeMeasures()
         part.makeTies(inPlace=True)
         score.insert(0, part)
     score.write("musicxml", fp=str(path))
     return f"{detected.tonic.name} {detected.mode}"
+
+
+# Muse Sounds solo players by part (Muse Strings ids). MuseScore gives every violin part the same
+# player, so the two violins would play identical samples; a project file can pick each one.
+# The last value is where each sits, -1 = far left: the usual quartet half circle (the cello
+# nearer the middle, as the bass carries the most energy).
+MUSE_SOLOISTS = [
+    ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5),
+    ("violin", "104", "Violin 2 (Solo)", "strings.violin.orchestral:secondary", -0.2),
+    ("viola", "105", "Viola (Solo)", "strings.viola.orchestral", 0.2),
+    ("violoncello", "106", "Violoncello (Solo)", "strings.violoncello.orchestral", 0.3),
+]
+
+
+PLAYING = {"pizz.": "pizzicato", "arco": "normal"}  # MuseScore's playing-technique names
+
+
+def prepare_project(mscz: Path) -> None:
+    """Set up a MuseScore project converted from our MusicXML: each part's player and seat
+    (MUSE_SOLOISTS, parts 1-4 in score order), and "pizz."/"arco", which MusicXML import leaves
+    as plain text, turned into playing techniques so the sound changes."""
+    with zipfile.ZipFile(mscz) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    for n in files:
+        if n.endswith(".mscx"):
+            files[n] = re.sub(
+                r"<StaffText>(\s*<eid>[^<]*</eid>)?\s*<text>(pizz\.|arco)</text>\s*</StaffText>",
+                lambda m: f"<PlayTechAnnotation>{m[1] or ''}<playTechType>{PLAYING[m[2]]}"
+                          f"</playTechType><text>{m[2]}</text></PlayTechAnnotation>",
+                files[n].decode()).encode()
+    settings = json.loads(files.get("audiosettings.json", b"{}") or b"{}")
+    settings["activeSoundProfile"] = "MuseSounds"
+    settings["tracks"] = [{
+        "in": {"resourceMeta": {
+            "attributes": {"museCategory": "Muse Strings", "museName": name, "musePack": "Muse Strings",
+                           "museUID": uid, "museVendorName": "Muse", "playbackSetupData": setup},
+            "hasNativeEditorSupport": False, "id": uid, "type": "muse_sampler_sound_pack",
+            "vendor": "MuseSounds"}, "unitConfiguration": {}},
+        "instrumentId": instrument, "partId": str(i + 1),
+        "out": {"balance": pan, "fxChain": {}, "volumeDb": 0},
+        "soloMuteState": {"mute": False, "solo": False},
+    } for i, (instrument, uid, name, setup, pan) in enumerate(MUSE_SOLOISTS)]
+    files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
+    with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in files.items():
+            z.writestr(n, data)
+
+
+@contextlib.contextmanager
+def one_at_a_time():
+    """Several songs may convert at once, but MuseScore (a desktop app) renders one at a time."""
+    try:
+        import fcntl
+    except ImportError:  # Windows: no flock, and nothing to coordinate with
+        yield
+        return
+    with open(Path(tempfile.gettempdir()) / "pop2quartet-musescore.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
 
 
 def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
@@ -148,7 +287,14 @@ def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
             return subprocess.run(["wslpath", "-w", str(p.resolve())], check=True,
                                   capture_output=True, text=True).stdout.strip()
         wav.unlink(missing_ok=True)  # so a stale preview can't pass for a fresh one
-        done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
+        project = score.with_suffix(".mscz")  # to choose each part's player (MUSE_SOLOISTS)
+        with one_at_a_time():
+            made = subprocess.run([mscore, "-o", native(project), native(score)], capture_output=True)
+            if made.returncode == 0 and project.exists():
+                prepare_project(project)
+                score = project
+            done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
+        project.unlink(missing_ok=True)
         if done.returncode == 0 and wav.exists():
             return "MuseScore"
     sf2 = next((p for p in SOUNDFONTS if Path(p).exists()), None)
@@ -157,3 +303,39 @@ def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
     subprocess.run(["fluidsynth", "-ni", "-q", "-F", str(wav), "-r", "44100", sf2, str(midi)],
                    check=True, stdout=subprocess.DEVNULL)
     return "fluidsynth"
+
+
+ROOMS = {"studio": None, "hall": (1.8, 0.22), "church": (3.2, 0.32)}  # (seconds to fade 60 dB, wet share)
+ROOM_TEMPOS = [(80, "church"), (110, "hall")]  # slower than this BPM -> this room, else studio
+
+
+def room_for(bpm: float) -> str:
+    """Ballads ring in a church, mid-tempo songs in a hall; fast ones stay close (studio), as long
+    reverb blurs quick notes and softens the groove."""
+    return next((room for limit, room in ROOM_TEMPOS if bpm < limit), "studio")
+
+
+def add_room(wav: Path, room: str = "studio", level_db: float = -20.0) -> None:
+    """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
+    noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95)."""
+    import numpy as np
+    import soundfile as sf
+    from scipy.signal import butter, fftconvolve, lfilter
+
+    y, sr = sf.read(str(wav), always_2d=True)
+    if y.shape[1] == 1:
+        y = np.repeat(y, 2, axis=1)
+    out = y
+    if ROOMS.get(room):
+        decay, wet = ROOMS[room]
+        t = np.arange(int(decay * sr)) / sr
+        tail = np.random.default_rng(0).standard_normal((len(t), 2)) * 10 ** (-3 * t / decay)[:, None]
+        tail = lfilter(*butter(2, 6000 / (sr / 2)), tail, axis=0)  # air absorbs the highs
+        ir = np.vstack([np.zeros((int(0.02 * sr), 2)), tail])  # 20 ms before the first echo
+        ir /= np.sqrt((ir ** 2).sum(axis=0))
+        room_y = np.stack([fftconvolve(y[:, c], ir[:, c])[:len(y)] for c in range(2)], axis=1)
+        room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
+        out = (1 - wet) * y + wet * room_y
+    rms = np.sqrt((out ** 2).mean())
+    gain = min(10 ** (level_db / 20) / max(rms, 1e-9), 0.95 / max(np.abs(out).max(), 1e-9))
+    sf.write(str(wav), out * gain, sr)

@@ -16,7 +16,7 @@ song.mp3 ─► Demucs ─► vocals / bass / other / drums stems
 
 ## How it works
 
-1. **Split the song** – [Demucs](https://github.com/facebookresearch/demucs) separates the mix
+1. **Split the song** – [Demucs](https://github.com/facebookresearch/demucs) (the fine-tuned `htdemucs_ft` model) separates the mix
    into vocals, bass, drums and "other" (the rest of the band). Runs on the GPU if available.
 2. **Find the beat** – librosa tracks beats on the drum stem (or the full mix if there are no
    drums). Note times are mapped onto the actual beats, so the score follows tempo drift.
@@ -90,6 +90,12 @@ different arrangement options takes seconds.
 
 | option | default | effect |
 |---|---|---|
+| `--melody` | best | how the tune is found: `best` = the lowest-cost note path through the sung pitch line, weighing pitch, key, chord and held notes at once (Viterbi); `notes` = the transcribed notes, cleaned up |
+| `--separator` | htdemucs_ft | Demucs model for the stems; the fine-tuned one separates vocals better (quality +0.03–0.04 on the songs tried), `htdemucs` is ~4x faster on a first run |
+| `--leap-cost` | 0.15 | best melody: extra cost per semitone jumped between notes, so pitch slips of a 4th, 5th or octave lose to stepwise motion (0 = off) |
+| `--root-fill` / `--no-root-fill` | on | where the bass is silent but the band plays chords, the cello plays the chord root (songs with no bass line, bass-less breakdowns) |
+| `--expression` / `--no-expression` | on | slurs over connected notes (one bow), pizzicato inner voices in the quietest verses, a swell to the top of each sung phrase |
+| `--room` | auto | reverb for the preview: `studio` (only the samples' own room), `hall` (~1.8 s), `church` (~3.2 s); `auto` picks by tempo: church under 80 BPM, hall under 110, studio above |
 | `--auto` / `--no-auto` | on | try the tempo as detected, half and double, grid 0.25/0.5 and harmony slot 1/2 (any you set yourself stay fixed), score each arrangement and keep the best |
 | `--grid` | auto (0.25) | rhythmic quantization in beats (0.5 = simpler, eighth-note rhythms) |
 | `--harmony-slot` | auto (1) | how often the inner voices may change chord; they hold notes while the harmony allows |

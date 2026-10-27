@@ -59,9 +59,9 @@ def transcribe(path: Path, kind: str) -> list[Note]:
     return notes
 
 
-def refine_pitch(path: Path, notes: list[Note], max_move: int = 2) -> list[Note]:
-    """Re-pitch notes from a pYIN f0 track: the median over each note ignores vibrato and
-    slides. Only small corrections are taken, so pYIN's own octave slips can't leak in."""
+def _pitch_track(path: Path) -> tuple[np.ndarray, np.ndarray, float]:
+    """(frame times, MIDI pitch per frame with the recording's tuning offset removed, offset).
+    pYIN f0 (NaN = unvoiced), cached next to the stem."""
     cache = path.with_suffix(".f0.npz")
     if cache.exists():
         d = np.load(cache)
@@ -80,8 +80,51 @@ def refine_pitch(path: Path, notes: list[Note], max_move: int = 2) -> list[Note]
     # landing nearer the semitone below, so measure the offset (circular mean) and undo it
     voiced = midi[~np.isnan(midi)]
     tuning = float(np.angle(np.mean(np.exp(2j * np.pi * voiced))) / (2 * np.pi)) if len(voiced) else 0.0
-    midi = midi - tuning
     print(f"[transcribe] {path.stem}: tuned {tuning * 100:+.0f} cents from A440")
+    return times, midi - tuning, tuning
+
+
+@lru_cache(maxsize=2)
+def sung_onsets(vocals: Path) -> np.ndarray:
+    """Times (s) where the singer starts a note, ignoring quiet bleed in the vocal stem."""
+    import librosa
+
+    y, sr = librosa.load(str(vocals), sr=22050, mono=True)
+    onsets = librosa.onset.onset_detect(y=y, sr=sr, units="time")
+    rms = librosa.feature.rms(y=y)[0]
+    rms_times = librosa.times_like(rms, sr=sr)
+    return np.array([t for t in onsets if rms[min(len(rms) - 1, np.searchsorted(rms_times, t))] > 0.02])
+
+
+def sung_line(vocals: Path, to_sec):
+    """The singing on the beat grid, for `best_melody`: line(total, step) -> (sung pitch per
+    step, NaN where nobody sings; whether the singer starts a syllable in that step)."""
+    times, midi, _ = _pitch_track(vocals)
+    onsets = sung_onsets(vocals)
+
+    def line(total: float, step: float) -> tuple[np.ndarray, np.ndarray]:
+        n = int(np.ceil(total / step))
+        edges = np.array([to_sec(k * step) for k in range(n + 1)])
+        idx = np.searchsorted(times, edges)
+        f0 = np.full(n, np.nan)
+        for k in range(n):
+            seg = midi[idx[k]:idx[k + 1]]
+            sung = seg[~np.isnan(seg)]
+            if len(sung) and len(sung) >= 0.5 * len(seg):
+                f0[k] = np.median(sung)
+        starts = np.zeros(n, bool)
+        mids = (edges[1:] + edges[:-1]) / 2  # an onset belongs to the nearest grid line
+        k = np.searchsorted(mids, onsets[(onsets >= edges[0]) & (onsets < edges[-1])])
+        starts[np.clip(k, 0, n - 1)] = True
+        return f0, starts
+
+    return line
+
+
+def refine_pitch(path: Path, notes: list[Note], max_move: int = 2) -> list[Note]:
+    """Re-pitch notes from a pYIN f0 track: the median over each note ignores vibrato and
+    slides. Only small corrections are taken, so pYIN's own octave slips can't leak in."""
+    times, midi, _ = _pitch_track(path)
     est = []
     for n in notes:
         seg = midi[(times >= n.start) & (times < n.end)]
@@ -157,7 +200,51 @@ def track_beats(drums: Path, mix: Path, bpm: float | None = None) -> tuple[float
     tempo = float(np.atleast_1d(tempo)[0])
     if len(beats) < 4:
         return tempo, np.arange(0.0, duration, 60.0 / tempo)
+    steady = steady_beats(y, sr, beats)
+    if steady is not None:
+        return 60.0 / float(np.median(np.diff(steady))), steady
     return tempo, beats
+
+
+def steady_beats(y: np.ndarray, sr: int, beats: np.ndarray, tolerance: float = 0.03):
+    """A perfectly even grid fitted to the drum hits, or None if the song's tempo really moves.
+    The tracker can only place beats on ~23 ms frames and lets the tempo bend, so on songs made
+    to a click it drifts and then jumps to catch up; the even grid wins when it fits the hits
+    at least as well (share of strong hits more than 30 ms from the nearest eighth)."""
+    import librosa
+
+    hop = 64  # ~3 ms
+    env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=hop)
+    et = librosa.times_like(env, sr=sr, hop_length=hop)
+    k = np.arange(len(beats))
+    period, first = np.polyfit(k, beats, 1)
+    best = (-1.0, period, first)
+    for span, step in ((0.02, 1e-4), (0.0004, 1e-5)):  # coarse, then fine
+        center = best[1]
+        for p in np.arange(center * (1 - span), center * (1 + span), step):
+            n = int((et[-1] - beats[0]) / p) + 2
+            phases = beats[0] - p + np.arange(0, p, 0.003)
+            grid = phases[:, None] + p * np.arange(n)[None, :]
+            score = np.interp(grid, et, env).sum(axis=1)
+            i = int(score.argmax())
+            if score[i] > best[0]:
+                best = (float(score[i]), p, float(phases[i]))
+    _, period, first = best
+    first -= period * np.floor((first - beats[0]) / period + 0.5)  # start near the first beat
+    first -= period * max(0, np.floor(first / period))
+    steady = first + period * np.arange(int((et[-1] - first) / period) + 1)
+
+    hits = librosa.onset.onset_detect(onset_envelope=env, sr=sr, hop_length=hop, units="time")
+    hits = hits[np.interp(hits, et, env) > np.percentile(env, 90)]
+
+    def missed(grid: np.ndarray) -> float:
+        pos = np.interp(hits, grid, np.arange(len(grid))) * 2
+        return float(np.mean(np.abs(pos - np.round(pos)) / 2 * period > tolerance))
+
+    tracked, even = missed(beats), missed(steady)
+    print(f"[beats] drum hits off the grid: tracked {tracked:.0%}, steady {60 / period:.2f} BPM "
+          f"{even:.0%} -> {'steady' if even <= tracked else 'tracked'}")
+    return steady if even <= tracked else None
 
 
 @lru_cache(maxsize=2)

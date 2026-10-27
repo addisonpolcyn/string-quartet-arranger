@@ -9,11 +9,11 @@ from pathlib import Path
 import numpy as np
 
 from .arrange import LEVELS, arrange, bar_phase, dynamics_plan
-from .export import render_audio, write_midi, write_musicxml
+from .export import ROOMS, add_room, render_audio, room_for, write_midi, write_musicxml
 from .quality import WEIGHTS, evaluate
 from .separate import separate
-from .transcribe import (Note, beat_loudness, chroma_repair, drum_pattern, refine_pitch, to_beats,
-                         track_beats, transcribe)
+from .transcribe import (Note, beat_loudness, chroma_repair, drum_pattern, refine_pitch,
+                         sung_line, to_beats, track_beats, transcribe)
 
 
 def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
@@ -51,7 +51,9 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             tie_repeats=args.tie_repeats, bass_hold=args.bass_hold,
                             three_voice=args.three_voice,
                             pattern=drum_pattern(stems["drums"], beat_times, offset),
-                            repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None)
+                            repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None,
+                            sung=sung_line(stems["vocals"], to_sec) if args.melody == "best" else None,
+                            leap=args.leap_cost, root_fill=args.root_fill)
     return {"parts": parts, "chords": chords, "plan": plan, "tempo": tempo, "to_sec": to_sec}
 
 
@@ -60,6 +62,15 @@ def main() -> None:
     ap.add_argument("audio", type=Path, help="input song (mp3/wav/flac/...)")
     ap.add_argument("-o", "--out", type=Path, help="output dir (default: out/<song>)")
     ap.add_argument("--cache", type=Path, default=Path(".cache"), help="stems/transcription cache")
+    ap.add_argument("--melody", choices=["notes", "best"], default="best",
+                    help="how the tune is found: notes = transcribed notes, cleaned up; best = the "
+                         "lowest-cost path through the sung pitch line, weighing pitch, key, chord "
+                         "and held notes all at once (Viterbi)")
+    ap.add_argument("--leap-cost", type=float, default=0.15,
+                    help="best melody: extra cost per semitone jumped between notes, so slips of a "
+                         "4th, 5th or octave lose to stepwise motion (0 = off)")
+    ap.add_argument("--separator", default="htdemucs_ft",
+                    help="Demucs model for the stems (htdemucs_ft: cleaner vocals; htdemucs: ~4x faster)")
     ap.add_argument("--bpm", type=float, help="override detected tempo (fixes half/double-time)")
     ap.add_argument("--pickup", type=float, default=0.0,
                     help="shift the barlines by N more beats if auto-detected bar 1 is still wrong")
@@ -92,18 +103,27 @@ def main() -> None:
     ap.add_argument("--inner", choices=["auto", "groove", "pad", "pulse"], default="auto",
                     help="inner voices: play the band's rhythm (groove), sustained chords (pad), "
                          "repeated eighths (pulse), or auto = groove, with pads in quiet sections")
+    ap.add_argument("--root-fill", action=argparse.BooleanOptionalAction, default=True,
+                    help="where the bass is silent but the band plays chords, the cello plays "
+                         "the chord's root (for songs with no bass line, and bass-less breakdowns)")
     ap.add_argument("--melody-octave", type=int, help="force melody octave shift (e.g. 1)")
     ap.add_argument("--bass-octave", type=int, help="force cello octave shift (e.g. 1)")
     ap.add_argument("--fill", action=argparse.BooleanOptionalAction, default=False,
                     help="fill melody rests with instrumental hooks (off: violin I sticks to the "
                          "vocal tune)")
+    ap.add_argument("--expression", action=argparse.BooleanOptionalAction, default=True,
+                    help="slurs, pizzicato inner voices in the quietest verses, and a swell over "
+                         "each sung phrase")
+    ap.add_argument("--room", choices=["auto", *ROOMS], default="auto",
+                    help="reverb for the preview: studio (only the samples' own room), hall (~1.8 s), "
+                         "church (~3.2 s), or auto = by tempo (church under 80 BPM, hall under 110)")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
     out = args.out or Path("out") / args.audio.stem
     out.mkdir(parents=True, exist_ok=True)
 
-    stems = separate(args.audio, args.cache)
+    stems = separate(args.audio, args.cache, args.separator)
     _, beat_times = track_beats(stems["drums"], args.audio, args.bpm)
 
     raw = {k: transcribe(stems[k], k) for k in ("vocals", "bass", "other")}
@@ -148,17 +168,20 @@ def main() -> None:
 
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
-    key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan)
+    key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
+                         args.expression)
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
         # MuseScore plays chord symbols on a piano, so the preview gets a copy without them
         bare = out / ".preview.musicxml"
-        write_musicxml(parts, tempo, bare, args.audio.stem, (), plan)
+        write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression)
         how = render_audio(bare, midi, out / "preview.wav")
         bare.unlink()
         if how:
-            print(f"[export] {out / 'preview.wav'} (played by {how})")
+            room = room_for(tempo) if args.room == "auto" else args.room
+            add_room(out / "preview.wav", room)
+            print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room)")
 
 
 if __name__ == "__main__":

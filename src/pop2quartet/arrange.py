@@ -152,6 +152,7 @@ def chord_per_slot(harmony: list[Note], bass: list[Note], total: float, slot: fl
     return chords
 
 
+MELODY_MIN = 0.5  # shortest melody note, in beats: 16th-note flickers sound nervous on a violin
 INNER_VELOCITY = 0.6  # the dynamics plan puts the accompaniment a level under (export.SOFTER)
 CHORDS = {  # quality -> intervals from the root; the 3rd is always second
     "major": (0, 4, 7), "minor": (0, 3, 7),
@@ -192,9 +193,10 @@ def chord_tones(chord: Chord | None) -> set[int] | None:
 
 def validate(notes: list[Note], labels: list[Chord | None], slot: float, part: str,
              scale: set[int] | None = None, min_len: float = 1.0) -> tuple[list[Note], int]:
-    """Fix long notes that don't belong to the chord under them. With `scale` (the melody), only
-    out-of-key notes a half step from a chord tone move, so sus4s, 9ths and the like survive;
-    otherwise (the bass) the note becomes the chord's root."""
+    """Fix notes that don't belong to the chord under them. With `scale` (the melody), every
+    out-of-key note moves into the key (unless the chord itself has it, e.g. a borrowed chord),
+    and long in-key notes rubbing a half step against a chord tone settle on it; sus4s, 9ths and
+    the like a whole step away survive. Otherwise (the bass) long notes become the chord's root."""
     lo, hi, _ = RANGES[part]
     out, fixed = [], 0
     for n in notes:
@@ -202,18 +204,20 @@ def validate(notes: list[Note], labels: list[Chord | None], slot: float, part: s
         spans = [(labels[k], min(n.end, (k + 1) * slot) - max(n.start, k * slot)) for k in ks]
         spans = [(c, ov) for c, ov in spans if c and ov > 0]
         off = sum(ov for c, ov in spans if n.pitch % 12 not in chord_tones(c))
-        p = n.pitch
-        if n.end - n.start >= min_len and spans and off > 0.5 * sum(ov for _, ov in spans):
-            chord = max(spans, key=lambda s: s[1])[0]
-            if scale is None:
+        clash = spans and off > 0.5 * sum(ov for _, ov in spans)
+        chord = max(spans, key=lambda s: s[1])[0] if spans else None
+        tones = chord_tones(chord) or set()
+        near = [pc for pc in tones if (pc - n.pitch) % 12 in (1, 11)]
+        targets = []
+        if scale is None:
+            if clash and n.end - n.start >= min_len:
                 targets = [chord[0]]
-            elif n.pitch % 12 not in scale:
-                targets = [pc for pc in chord_tones(chord) if (pc - n.pitch) % 12 in (1, 11)]
-            else:
-                targets = []
-            cands = [q for q in range(lo, hi + 1) if q % 12 in targets]
-            if cands:
-                p = min(cands, key=lambda q: abs(q - n.pitch))
+        elif n.pitch % 12 not in scale and (clash or not spans):
+            targets = near or [pc for pc in scale if (pc - n.pitch) % 12 in (1, 11)]
+        elif clash and n.end - n.start >= 2 * min_len:
+            targets = near
+        cands = [q for q in range(lo, hi + 1) if q % 12 in targets]
+        p = min(cands, key=lambda q: abs(q - n.pitch)) if cands else n.pitch
         fixed += p != n.pitch
         out.append(Note(n.start, n.end, p, n.velocity))
     return out, fixed
@@ -382,6 +386,100 @@ def voice_inner(chords, melody, bass, slot, essentials=None, solo=None):
     return vln2, vla
 
 
+MELODY_COST = {  # what the best melody trades off; all per grid step unless noted
+    "off_pitch": 1.0,   # x (semitones away from the sung pitch)^2, capped at 3 semitones
+    "out_of_key": 1.5,  # a pitch outside the key, unless the chord has it
+    "non_chord": 0.15,  # an in-key pitch that isn't in the chord
+    "rest_sung": 3.0,   # resting while the singer sings
+    "hold_unsung": 0.4, # holding a note through a breath
+    "change": 1.0,      # per new note: keeps notes held instead of flickering
+    "change_onset": 0.1,  # ... when the singer starts a syllable right there
+    "leap": 0.0,        # per semitone jumped between notes (tunes mostly move by step)
+    "past_octave": 1.0, # extra for a jump wider than an octave, when "leap" is on
+}
+
+
+def best_melody(f0: np.ndarray, starts: np.ndarray, labels: list[Chord | None], slot: float,
+                scale: set[int], step: float, cost=MELODY_COST) -> list[Note]:
+    """The whole tune at once: the note sequence (a pitch or a rest per grid step) with the lowest
+    total cost (MELODY_COST) over the song, found with the Viterbi algorithm. Notes split where
+    the singer re-attacks the same pitch (a repeated syllable)."""
+    sung = ~np.isnan(f0)
+    if not sung.any():
+        return []
+    pitches = np.arange(int(np.nanmin(f0)) - 2, int(np.nanmax(f0)) + 3)
+    n, rest = len(f0), len(pitches)  # state index `rest` = no note
+    pc = pitches % 12
+    in_key = np.isin(pc, list(scale))
+    local = np.zeros((n, rest + 1))
+    for t in range(n):
+        k = int(t * step // slot)
+        tones = chord_tones(labels[k]) if k < len(labels) else None
+        in_chord = np.isin(pc, list(tones)) if tones else np.ones(rest, bool)
+        local[t, :rest] = (cost["out_of_key"] * (~in_key & ~in_chord)
+                           + cost["non_chord"] * (in_key & ~in_chord))
+        if sung[t]:
+            local[t, :rest] += cost["off_pitch"] * np.minimum(np.abs(pitches - f0[t]), 3) ** 2
+            local[t, rest] = cost["rest_sung"]
+        else:
+            local[t, :rest] += cost["hold_unsung"]
+    total = local[0].copy()
+    back = np.zeros((n, rest + 1), int)
+    keep = np.arange(rest + 1)
+    if cost["leap"]:  # from-to cost of every jump between pitches (rests are free to enter/leave)
+        moved = np.zeros((rest + 1, rest + 1))
+        d = np.abs(pitches[:, None] - pitches[None, :])
+        moved[:rest, :rest] = cost["leap"] * d + cost["past_octave"] * (d > 12)
+        new = 1.0 - np.eye(rest + 1)
+    for t in range(1, n):
+        change = cost["change_onset"] if starts[t] else cost["change"]
+        if cost["leap"]:
+            via = total[:, None] + change * new + moved
+            back[t] = via.argmin(axis=0)
+            total = via[back[t], keep] + local[t]
+            continue
+        j = int(total.argmin())
+        jump = total[j] + change
+        back[t] = np.where(jump < total, j, keep)
+        total = np.minimum(total, jump) + local[t]
+    path = np.empty(n, int)
+    path[-1] = int(total.argmin())
+    for t in range(n - 1, 0, -1):
+        path[t - 1] = back[t, path[t]]
+
+    notes: list[Note] = []
+    t = 0
+    while t < n:
+        u = t + 1
+        while u < n and path[u] == path[t]:
+            u += 1
+        if path[t] != rest:
+            cuts = [t] + [v for v in range(t + 1, u) if starts[v]
+                          and (v - t) * step >= MELODY_MIN and (u - v) * step >= MELODY_MIN] + [u]
+            for a, b in zip(cuts, cuts[1:]):
+                notes.append(Note(a * step, b * step, int(pitches[path[t]]), 0.8))
+        t = u
+    return notes
+
+
+def fill_roots(cello: list[Note], labels: list[Chord | None], band: list[Note],
+               slot: float, low: int = 40) -> tuple[list[Note], int]:
+    """Where the bass is silent but the band plays chords, the cello plays the chord's root
+    (E2-Eb3), one note per chord, so songs without a bass player (guitar and voice) or with
+    bass-less breakdowns still have a floor. Where the whole band rests, so does the cello."""
+    added: list[Note] = []
+    for k, chord in enumerate(labels):
+        s, e = k * slot, (k + 1) * slot
+        if not chord or sounding(cello, s, e) or not sounding(band, s, e):
+            continue
+        pitch = low + (chord[0] - low) % 12
+        if added and added[-1].pitch == pitch and added[-1].end == s:
+            added[-1] = Note(added[-1].start, e, pitch, added[-1].velocity)
+        else:
+            added.append(Note(s, e, pitch, 0.7))
+    return sorted(cello + added, key=lambda n: n.start), len(added)
+
+
 def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
     """Undo octave errors: a leap of more than an octave goes to the nearest octave instead."""
     lo, hi, _ = RANGES[part]
@@ -451,13 +549,26 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
-            tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None):
-    """Returns (parts, chord changes as (beat, (root pitch class, quality)))."""
+            tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
+            leap=0.0, root_fill=False):
+    """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
+    transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
     vocals, bass = drop_harmonics(vocals), drop_harmonics(bass)
 
+    total = max((n.end for n in vocals + bass + other), default=0.0)
+    tonic, mode = detect_key({"vocals": vocals, "bass": bass, "other": other})
+    scale = {(NAMES.index(tonic) + i) % 12
+             for i in ((0, 2, 4, 5, 7, 9, 11) if mode == "major" else (0, 2, 3, 5, 7, 8, 10))}
+    labels = label_chords(pc_histogram(other, bass, total, harmony_slot), harmony_slot, scale)
+    chords = [chord_tones(c) for c in labels]
+
     hooks = monophonic(drop_harmonics(other), pick=lambda g: max(g, key=lambda n: n.pitch))
-    if vocals:
+    if vocals and sung:
+        melody = best_melody(*sung(total, grid), labels, harmony_slot, scale, grid,
+                             {**MELODY_COST, "leap": leap})
+        print(f"[melody] best path through the sung pitch line: {len(melody)} notes")
+    elif vocals:
         melody = monophonic(vocals, pick=lambda g: max(g, key=lambda n: n.velocity), legato_gap=grid)
     else:  # instrumental track: the top line of the band is the best guess at the tune
         melody, fill = hooks, False
@@ -469,21 +580,18 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     cello = monophonic(bass, pick=lambda g: min(g, key=lambda n: n.pitch), legato_gap=grid)
     cello = fit_range(cello, "vc", bass_shift)
     if min_note:
-        melody = simplify(smooth_octaves(melody, "vln1"), min_note)
+        melody = simplify(smooth_octaves(melody, "vln1"), max(min_note, MELODY_MIN))
         cello = simplify(smooth_octaves(cello, "vc"), min_note)
     if hold_gap:
         melody = hold(melody, hold_gap)
     if tie_repeats:
         melody = merge_repeats(melody)
 
-    total = max((n.end for n in melody + cello + other), default=0.0)
-    tonic, mode = detect_key({"vocals": vocals, "bass": bass, "other": other})
-    scale = {(NAMES.index(tonic) + i) % 12
-             for i in ((0, 2, 4, 5, 7, 9, 11) if mode == "major" else (0, 2, 3, 5, 7, 8, 10))}
-    labels = label_chords(pc_histogram(other, bass, total, harmony_slot), harmony_slot, scale)
-    chords = [chord_tones(c) for c in labels]
     melody, fixed_mel = validate(melody, labels, harmony_slot, "vln1", scale)
     cello, fixed_vc = validate(cello, labels, harmony_slot, "vc")
+    if root_fill:
+        cello, filled = fill_roots(cello, labels, other, harmony_slot)
+        print(f"[arrange] cello plays the chord root in {filled} bass-less spots")
     print(f"[chords] fixed {fixed_mel} melody and {fixed_vc} cello notes that clashed with the chord")
     if repair:  # last word on the tune goes to the recording itself
         melody, matched = repair(melody, scale)
