@@ -11,7 +11,7 @@ song.mp3 ─► Demucs ─► vocals / bass / other / drums stems
                          ▼       ▼      ▼
                    Violin I   Cello   Violin II + Viola
                    (melody)   (bass)  (chords, voice-led)
-                         └───────┴──────┴─► quartet.musicxml / quartet.mid / preview.wav
+                         └───────┴──────┴─► quartet.musicxml / quartet.mid / preview.wav / release.wav
 ```
 
 ## How it works
@@ -103,6 +103,7 @@ different arrangement options takes seconds.
 | `--accents` / `--no-accents` | on | inner voices accent the backbeat (2 and 4) and play quick notes short |
 | `--rubato` / `--no-rubato` | on | preview only: the tempo gives a little at the end of each sung phrase |
 | `--master` / `--no-master` | on | preview only: EQ (less low-mid mud, a touch of air) and a louder, limited level |
+| `--release` / `--no-release` | on | also write `release.wav` for Spotify and other streaming services: the preview at -14 LUFS, true peaks under -1 dBTP, dead air trimmed, 24-bit / 44.1 kHz |
 | `--auto` / `--no-auto` | on | try the tempo as detected, half and double, grid 0.25/0.5 and harmony slot 1/2 (any you set yourself stay fixed), score each arrangement and keep the best |
 | `--grid` | auto (0.25) | rhythmic quantization in beats (0.5 = simpler, eighth-note rhythms) |
 | `--harmony-slot` | auto (1) | how often the inner voices may change chord; they hold notes while the harmony allows |

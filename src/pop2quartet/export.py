@@ -434,3 +434,39 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
     rms = np.sqrt((out ** 2).mean())
     gain = min(10 ** (level_db / 20) / max(rms, 1e-9), 0.95 / max(np.abs(out).max(), 1e-9))
     sf.write(str(wav), out * gain, sr)
+
+
+RELEASE_LUFS = -14.0  # Spotify's playback level
+RELEASE_CEILING_DB = -1.3  # limiter ceiling; margin under Spotify's -1 dBTP after resampling
+
+
+def loudness(wav: Path) -> tuple[float, float]:
+    """Integrated loudness (LUFS) and true peak (dBTP), measured by ffmpeg's EBU R128 scanner."""
+    log = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", str(wav),
+                          "-af", "ebur128=peak=true", "-f", "null", "-"],
+                         capture_output=True, text=True).stderr
+    summary = log[log.rfind("Summary:"):]
+    return (float(re.search(r"I:\s+(-?[\d.]+) LUFS", summary)[1]),
+            float(re.search(r"Peak:\s+(-?[\d.]+) dBFS", summary)[1]))
+
+
+def master_for_release(src: Path, dst: Path) -> tuple[float, float]:
+    """Ready a finished preview for streaming: nudge it to -14 LUFS, round off the peaks with a
+    gentle limiter run at 4x the sample rate (so it catches the peaks between samples, which a
+    lossy encode would clip), trim dead air at both ends, and write 24-bit / 44.1 kHz WAV, which
+    every distributor accepts. Returns the result's (LUFS, dBTP)."""
+    gain = RELEASE_LUFS - loudness(src)[0]
+    chain = ",".join([
+        "silenceremove=start_periods=1:start_threshold=-70dB",  # dead air before the first note
+        "areverse,silenceremove=start_periods=1:start_threshold=-70dB,areverse",  # ...and after the tail
+        "adelay=150|150", "afade=t=in:d=0.01",  # a short breath before the downbeat, no click
+        f"volume={gain:.2f}dB",
+        "aresample=176400:resampler=soxr",
+        f"alimiter=limit={10 ** (RELEASE_CEILING_DB / 20):.4f}:attack=5:release=80:level=disabled",
+        "aresample=44100:resampler=soxr:precision=28",
+    ])
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
+                    "-af", chain, "-c:a", "pcm_s24le", "-ar", "44100", str(dst)], check=True)
+    return loudness(dst)
+

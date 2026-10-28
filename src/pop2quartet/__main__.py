@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 
 from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, lift_last_chorus
-from .export import ROOMS, add_room, render_audio, room_for, write_midi, write_musicxml
+from .export import ROOMS, add_room, master_for_release, render_audio, room_for, write_midi, write_musicxml
 from .quality import WEIGHTS, evaluate
 from .separate import separate
 from .transcribe import (Note, beat_loudness, chroma_repair, drum_activity, drum_pattern,
@@ -138,6 +138,8 @@ def main() -> None:
                     help="preview only: the tempo gives a little at the end of each sung phrase")
     ap.add_argument("--master", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: EQ (less low-mid mud, more air) and a louder, limited level")
+    ap.add_argument("--release", action=argparse.BooleanOptionalAction, default=True,
+                    help="also write release.wav: the preview at -14 LUFS, peaks under -1 dBTP, 24-bit")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -204,6 +206,9 @@ def main() -> None:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
             add_room(out / "preview.wav", room, master=args.master)
             print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room)")
+            if args.release:
+                lufs, peak = master_for_release(out / "preview.wav", out / "release.wav")
+                print(f"[export] {out / 'release.wav'} ({lufs:.1f} LUFS, {peak:.1f} dBTP)")
 
 
 if __name__ == "__main__":
