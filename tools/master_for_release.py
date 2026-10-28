@@ -1,5 +1,5 @@
-"""Master previews already rendered for streaming: out/<song>/preview.wav -> out/release/<song>.wav,
-the same step the pipeline runs with --release (see export.master_for_release).
+"""Ready previews rendered before --release existed for streaming, in place: the same step the
+pipeline now runs on every preview (see export.master_for_release). Re-running is harmless.
 
     python tools/master_for_release.py [song ...]     # default: every song in out/
 """
@@ -18,12 +18,12 @@ def main() -> None:
     for song in songs:
         src = OUT / song / "preview.wav"
         before = loudness(src)
-        after = master_for_release(src, OUT / "release" / f"{song}.wav")
+        after = master_for_release(src, src)
         report.append({"song": song, "before_lufs": before[0], "before_peak": before[1],
                        "lufs": after[0], "true_peak": after[1], "ok": after[1] <= -1.0})
         print(f"{song:24s} {before[0]:6.1f} LUFS {before[1]:5.1f} dBTP -> "
               f"{after[0]:6.1f} LUFS {after[1]:5.1f} dBTP {'ok' if after[1] <= -1.0 else 'TOO HOT'}")
-    (OUT / "release" / "report.json").write_text(json.dumps(report, indent=1))
+    (OUT / "release_report.json").write_text(json.dumps(report, indent=1))
 
 
 if __name__ == "__main__":

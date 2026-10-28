@@ -139,7 +139,7 @@ def main() -> None:
     ap.add_argument("--master", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: EQ (less low-mid mud, more air) and a louder, limited level")
     ap.add_argument("--release", action=argparse.BooleanOptionalAction, default=True,
-                    help="also write release.wav: the preview at -14 LUFS, peaks under -1 dBTP, 24-bit")
+                    help="preview only: ready for streaming at -14 LUFS, peaks under -1 dBTP, 24-bit")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -205,10 +205,11 @@ def main() -> None:
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
             add_room(out / "preview.wav", room, master=args.master)
-            print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room)")
+            level = ""
             if args.release:
-                lufs, peak = master_for_release(out / "preview.wav", out / "release.wav")
-                print(f"[export] {out / 'release.wav'} ({lufs:.1f} LUFS, {peak:.1f} dBTP)")
+                lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav")
+                level = f", {lufs:.1f} LUFS, {peak:.1f} dBTP"
+            print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room{level})")
 
 
 if __name__ == "__main__":

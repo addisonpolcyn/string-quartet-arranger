@@ -466,7 +466,10 @@ def master_for_release(src: Path, dst: Path) -> tuple[float, float]:
         "aresample=44100:resampler=soxr:precision=28",
     ])
     dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}")  # ffmpeg can't write over its own input
     subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src),
-                    "-af", chain, "-c:a", "pcm_s24le", "-ar", "44100", str(dst)], check=True)
+                    "-af", chain, "-c:a", "pcm_s24le", "-ar", "44100", "-f", "wav", str(tmp)],
+                   check=True)
+    tmp.replace(dst)
     return loudness(dst)
 
