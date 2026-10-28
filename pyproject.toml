@@ -10,7 +10,10 @@ dependencies = [
     "music21>=10.5.1",
     "numpy<2",
     "pretty-midi>=0.2.11.post0",
+    "setuptools<81",
     "soundfile>=0.14.0",
+    "torchaudio==2.2.2",
+    "torchcrepe>=0.0.24",
 ]
 
 [project.scripts]

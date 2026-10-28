@@ -13,8 +13,8 @@ from .export import (PARTS, RELEASE_LUFS, ROOMS, add_room, intonation, master_fo
                      phrase_arcs, preview_seconds, render_audio, room_for, write_midi, write_musicxml)
 from .quality import WEIGHTS, evaluate
 from .separate import separate
-from .transcribe import (Note, beat_loudness, chroma_repair, drum_activity, drum_pattern,
-                         refine_pitch, sung_line, to_beats, track_beats, transcribe)
+from .transcribe import (Note, band_chroma, beat_loudness, chroma_repair, drum_activity, drum_pattern,
+                         refine_pitch, song_sections, sung_line, to_beats, track_beats, transcribe)
 
 
 def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
@@ -33,7 +33,12 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
     shift = round(offset)
     loud = beat_loudness(args.audio, beat_times)
     loud = np.concatenate([np.full(max(0, shift), loud.min()), loud[max(0, -shift):]])
-    plan = dynamics_plan(loud, dynamic_range=args.dynamics) if args.dynamics != "off" else None
+    sections = None
+    if args.sections == "repeats":
+        labels = song_sections(args.audio, tuple(float(b) for b in beat_times))
+        sections = np.concatenate([np.full(max(0, shift), labels[0]), labels[max(0, -shift):]])
+    plan = (dynamics_plan(loud, dynamic_range=args.dynamics, sections=sections)
+            if args.dynamics != "off" else None)
     tempo = 60.0 / float(np.median(np.diff(beat_times)))
     if verbose:
         print(f"[beats] tempo ~{tempo:.1f} BPM, downbeat on tracked beat {phase} (mod 4)")
@@ -53,11 +58,13 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             three_voice=args.three_voice,
                             pattern=drum_pattern(stems["drums"], beat_times, offset),
                             repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None,
-                            sung=sung_line(stems["vocals"], to_sec) if args.melody == "best" else None,
+                            sung=sung_line(stems["vocals"], to_sec, args.pitch) if args.melody == "best" else None,
                             leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter,
                             repeat_gap=args.max_repeat * float(np.median(np.diff(beat_times))) ** -1
                             if args.max_repeat else 0.0,
-                            sparse_until=first_chorus(plan) if args.vary else 0.0)
+                            sparse_until=first_chorus(plan) if args.vary else 0.0,
+                            harmony=band_chroma(stems["other"], stems["bass"], to_sec)
+                            if args.chords == "audio" else None)
     if args.lift:
         parts, start = lift_last_chorus(parts, plan)
         if verbose and start >= 0:
@@ -196,6 +203,19 @@ def main() -> None:
     ap.add_argument("--intonation", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: tune notes the way a quartet does (thirds toward pure, the "
                          "leading tone sharp, a few cents of spread) instead of dead in tune")
+    ap.add_argument("--pitch", choices=["pyin", "crepe"], default="crepe",
+                    help="pitch tracker for the sung line: pyin, or crepe (a neural tracker, steadier on voices)")
+    ap.add_argument("--chords", choices=["notes", "audio"], default="audio",
+                    help="name chords from the band's transcribed notes, or from its audio (chroma)")
+    ap.add_argument("--sections", choices=["loudness", "repeats"], default="loudness",
+                    help="dynamics change by loudness alone, or at detected sections (passages that "
+                         "repeat), with the loudest returning one as the chorus")
+    ap.add_argument("--reverb", choices=["noise", "real"], default="real",
+                    help="preview only: the room's echo synthesized from noise, or recorded in real "
+                         "spaces (impulse responses in <cache>/ir)")
+    ap.add_argument("--timing", choices=["drift", "notes"], default="notes",
+                    help="preview only, with --humanize: the players drift slowly apart, or stay together "
+                         "and slip on single notes (mostly entries), then find each other again")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -207,7 +227,7 @@ def main() -> None:
 
     raw = {k: transcribe(stems[k], k) for k in ("vocals", "bass", "other")}
     if raw["vocals"]:
-        raw["vocals"] = refine_pitch(stems["vocals"], raw["vocals"])
+        raw["vocals"] = refine_pitch(stems["vocals"], raw["vocals"], tracker=args.pitch)
     for k, ns in raw.items():
         print(f"[transcribe] {k}: {len(ns)} notes")
 
@@ -269,8 +289,12 @@ def main() -> None:
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
                        args.accents, args.rubato, args.slides, marks, args.swells == "score")
         tunings = intonation(parts, chords) if args.intonation else None
+        onsets = None
+        if args.timing == "notes":
+            onsets = [[(float(preview_seconds(n.start, tempo, marks)), i == 0 or n.start - ns[i - 1].end >= 0.5)
+                       for i, n in enumerate(ns)] for ns in (parts[k] for k, *_ in PARTS)]
         how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
-                           [tunings[k] for k, *_ in PARTS] if tunings else None)
+                           [tunings[k] for k, *_ in PARTS] if tunings else None, onsets)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
@@ -280,7 +304,7 @@ def main() -> None:
                                              tempo, marks))
                        for a, p, b in phrase_arcs(tune, [])] if args.swells == "mix" else []
             add_room(out / "preview.wav", room, master=args.master, contour=contour, swells=phrases,
-                     swell_db=args.swell_db)
+                     swell_db=args.swell_db, irs=args.cache / "ir" if args.reverb == "real" else None)
             level = ""
             if args.release:
                 lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav", args.lufs)

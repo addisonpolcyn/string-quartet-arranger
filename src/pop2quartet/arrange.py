@@ -241,16 +241,34 @@ DYNAMIC_RANGES = {  # name -> (quietest level, quantile cuts between levels)
 }
 
 
-def dynamics_plan(loudness: np.ndarray, min_bars: int = 4,
-                  dynamic_range: str = "gentle") -> list[tuple[float, int]]:
+def dynamics_plan(loudness: np.ndarray, min_bars: int = 4, dynamic_range: str = "gentle",
+                  sections: np.ndarray | None = None) -> list[tuple[float, int]]:
     """Per-beat loudness of the song -> (start beat, LEVELS index) sections for the tune.
     Bars are ranked against the rest of the song (gentle: quietest 15% mp, loudest 20% f, mf in
-    between), and sections shorter than `min_bars` merge into the neighbour closest in level."""
+    between), and sections shorter than `min_bars` merge into the neighbour closest in level.
+    With `sections` (a label per beat, transcribe.song_sections), each detected section takes
+    one level from its average loudness, and the loudest section that comes back (the chorus)
+    is always the top level, so changes land where the song's sections do."""
     lowest, cuts = DYNAMIC_RANGES[dynamic_range]
     n_bars = max(1, math.ceil(len(loudness) / 4))
     bar_db = np.array([np.mean(loudness[4 * b:4 * b + 4]) for b in range(n_bars)])
     bar_db = np.convolve(np.pad(bar_db, 1, mode="edge"), np.ones(3) / 3, mode="valid")
     levels = lowest + np.searchsorted(np.quantile(bar_db, cuts), bar_db)
+    if sections is not None and len(sections):
+        bar_label = np.array([sections[min(len(sections) - 1, 4 * b)] for b in range(n_bars)])
+        segs, b = [], 0  # (first bar, end bar, label)
+        while b < n_bars:
+            e = b
+            while e < n_bars and bar_label[e] == bar_label[b]:
+                e += 1
+            segs.append((b, e, bar_label[b]))
+            b = e
+        seg_db = np.concatenate([np.full(e - b, bar_db[b:e].mean()) for b, e, _ in segs])
+        levels = lowest + np.searchsorted(np.quantile(seg_db, cuts), seg_db)
+        returning = {lab for lab in bar_label if sum(1 for *_, l in segs if l == lab) >= 2}
+        if returning:
+            chorus = max(returning, key=lambda lab: bar_db[bar_label == lab].mean())
+            levels[bar_label == chorus] = lowest + len(cuts)
     runs = []  # [level, length in bars]
     for lv in levels:
         if runs and runs[-1][0] == lv:
@@ -633,11 +651,13 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
-            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0):
+            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0, harmony=None):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
     transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes.
     Before beat `sparse_until` (the first verse) the inner voices hold their chords instead of
-    playing the groove and don't answer the tune, so the song has somewhere to build to."""
+    playing the groove and don't answer the tune, so the song has somewhere to build to.
+    With `harmony` (transcribe.band_chroma), chords are named from the band's audio rather than
+    from its transcribed notes."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
     vocals, bass = drop_harmonics(vocals), drop_harmonics(bass)
 
@@ -645,7 +665,8 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     tonic, mode = detect_key({"vocals": vocals, "bass": bass, "other": other})
     scale = {(NAMES.index(tonic) + i) % 12
              for i in ((0, 2, 4, 5, 7, 9, 11) if mode == "major" else (0, 2, 3, 5, 7, 8, 10))}
-    labels = label_chords(pc_histogram(other, bass, total, harmony_slot), harmony_slot, scale)
+    weights = harmony(total, harmony_slot) if harmony else pc_histogram(other, bass, total, harmony_slot)
+    labels = label_chords(weights, harmony_slot, scale)
     chords = [chord_tones(c) for c in labels]
 
     hooks = monophonic(drop_harmonics(other), pick=lambda g: max(g, key=lambda n: n.pitch))

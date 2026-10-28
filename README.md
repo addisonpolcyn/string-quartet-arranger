@@ -75,6 +75,11 @@ uv sync
 For a realistic `preview.wav`, install [MuseScore 4](https://musescore.org) and the Muse Strings
 library (through MuseHub). Under WSL, the Windows install is found and used automatically.
 
+For real-room reverb, put three impulse responses from Voxengo's free
+[IM Reverbs pack](https://www.voxengo.com/impulses/) (royalty-free, commercial use allowed; not to be
+redistributed) in `.cache/ir/`: `French 18th Century Salon.wav`, `Musikvereinsaal.wav` and
+`St Nicolaes Church.wav`. Without them the preview falls back to the synthesized room.
+
 ## Usage
 
 ```bash
@@ -110,6 +115,11 @@ different arrangement options takes seconds.
 | `--ride-amount` | 0.2 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
 | `--lead-ahead` | 2 | preview only: if violin I sits less than this many dB over the other three (a busy accompaniment), turn them down for the song to get it there, at most 8 dB |
 | `--intonation` / `--no-intonation` | on | preview only: tune notes the way a quartet does (major 3rds 10 cents low, minor 3rds 8 high, the tune's leading tone 10 sharp, ~4 cents of spread) instead of dead in tune |
+| `--pitch` | crepe | pitch tracker for the sung line: `crepe` (neural, steadier on voices) or `pyin` |
+| `--chords` | audio | name chords from the band's audio (chroma of the separated stems) or from its transcribed `notes` |
+| `--sections` | loudness | dynamics by loudness, or `repeats`: at detected sections, the loudest returning one as the chorus (experimental: found Boston's choruses, missed Save Your Tears') |
+| `--reverb` | real | preview only: rooms recorded in real spaces (impulse responses in `<cache>/ir`, see below), or `noise` |
+| `--timing` | notes | preview only, with `--humanize`: the players stay together and slip on single notes (mostly entries), then find each other again; `drift` = slow continuous drift |
 | `--humanize` | 10 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
 | `--speed` | 1.0 | play the quartet at this share of the recording's tempo (0.85 = 15% slower) |
 | `--vary` / `--no-vary` | on | first verse sparse (held chords, no answers), so later verses and choruses build |

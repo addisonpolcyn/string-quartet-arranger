@@ -59,19 +59,37 @@ def transcribe(path: Path, kind: str) -> list[Note]:
     return notes
 
 
-def _pitch_track(path: Path) -> tuple[np.ndarray, np.ndarray, float]:
+def _crepe(y: np.ndarray, sr: int, hop: int) -> np.ndarray:
+    """f0 per frame from CREPE (a neural pitch tracker for one voice, far steadier on singing
+    than pYIN), NaN where it isn't confident there is a pitch."""
+    import torch
+    import torchcrepe
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    f0, periodicity = torchcrepe.predict(torch.tensor(y[None], dtype=torch.float32), sr, hop, 80, 1200,
+                                         "full", decoder=torchcrepe.decode.viterbi,
+                                         return_periodicity=True, batch_size=1024, device=device)
+    periodicity = torchcrepe.filter.median(periodicity, 3)
+    f0, periodicity = f0[0].cpu().numpy(), periodicity[0].cpu().numpy()
+    return np.where(periodicity > 0.5, f0, np.nan)
+
+
+def _pitch_track(path: Path, tracker: str = "pyin") -> tuple[np.ndarray, np.ndarray, float]:
     """(frame times, MIDI pitch per frame with the recording's tuning offset removed, offset).
-    pYIN f0 (NaN = unvoiced), cached next to the stem."""
-    cache = path.with_suffix(".f0.npz")
+    pYIN or CREPE f0 (NaN = unvoiced), cached next to the stem."""
+    cache = path.with_suffix(".f0.npz" if tracker == "pyin" else f".{tracker}.npz")
     if cache.exists():
         d = np.load(cache)
         times, f0 = d["times"], d["f0"]
     else:
         import librosa
 
-        print(f"[transcribe] {path.stem}: tracking pitch with pYIN ...")
+        print(f"[transcribe] {path.stem}: tracking pitch with {tracker} ...")
         y, sr = librosa.load(str(path), sr=16000, mono=True)
-        f0, _, _ = librosa.pyin(y, fmin=80, fmax=1200, sr=sr, hop_length=320)  # NaN = unvoiced
+        if tracker == "crepe":
+            f0 = _crepe(y, sr, 320)
+        else:
+            f0, _, _ = librosa.pyin(y, fmin=80, fmax=1200, sr=sr, hop_length=320)  # NaN = unvoiced
         times = librosa.times_like(f0, sr=sr, hop_length=320)
         np.savez(cache, times=times, f0=f0)
     with np.errstate(invalid="ignore"):
@@ -96,10 +114,10 @@ def sung_onsets(vocals: Path) -> np.ndarray:
     return np.array([t for t in onsets if rms[min(len(rms) - 1, np.searchsorted(rms_times, t))] > 0.02])
 
 
-def sung_line(vocals: Path, to_sec):
+def sung_line(vocals: Path, to_sec, tracker: str = "pyin"):
     """The singing on the beat grid, for `best_melody`: line(total, step) -> (sung pitch per
     step, NaN where nobody sings; whether the singer starts a syllable in that step)."""
-    times, midi, _ = _pitch_track(vocals)
+    times, midi, _ = _pitch_track(vocals, tracker)
     onsets = sung_onsets(vocals)
 
     def line(total: float, step: float) -> tuple[np.ndarray, np.ndarray]:
@@ -121,10 +139,10 @@ def sung_line(vocals: Path, to_sec):
     return line
 
 
-def refine_pitch(path: Path, notes: list[Note], max_move: int = 2) -> list[Note]:
+def refine_pitch(path: Path, notes: list[Note], max_move: int = 2, tracker: str = "pyin") -> list[Note]:
     """Re-pitch notes from a pYIN f0 track: the median over each note ignores vibrato and
     slides. Only small corrections are taken, so pYIN's own octave slips can't leak in."""
-    times, midi, _ = _pitch_track(path)
+    times, midi, _ = _pitch_track(path, tracker)
     est = []
     for n in notes:
         seg = midi[(times >= n.start) & (times < n.end)]
@@ -312,3 +330,92 @@ def to_beats(notes: list[Note], beat_times: np.ndarray) -> list[Note]:
         return float(np.interp(t, beat_times, idx))
 
     return [Note(conv(n.start), conv(n.end), n.pitch, n.velocity) for n in notes]
+
+
+@lru_cache(maxsize=2)
+def _band_chroma(other: Path, bass: Path) -> tuple[np.ndarray, np.ndarray]:
+    """(frame times, 12 x frames) pitch-class energy of the band and the bass (at half weight),
+    from the audio itself: CQT chroma per frame, weighted by how loud the frame is so silence
+    and bleed don't vote."""
+    import librosa
+
+    total, times = None, None
+    for path, weight in ((other, 1.0), (bass, 0.5)):
+        y, sr = librosa.load(str(path), sr=22050, mono=True)
+        chroma = librosa.feature.chroma_cqt(y=y, sr=sr, hop_length=1024)
+        rms = librosa.feature.rms(y=y, hop_length=1024)[0][:chroma.shape[1]]
+        gate = np.clip(rms / (np.percentile(rms, 95) + 1e-9), 0, 1)
+        part = weight * chroma[:, :len(gate)] * gate
+        if total is None:
+            total, times = part, librosa.times_like(part, sr=sr, hop_length=1024)
+        else:
+            n = min(total.shape[1], part.shape[1])
+            total, times = total[:, :n] + part[:, :n], times[:n]
+    return times, total
+
+
+def band_chroma(other: Path, bass: Path, to_sec):
+    """The band's harmony per slot, for naming chords from the audio instead of from transcribed
+    notes: harmony(total, slot) -> slots x 12, on the same scale as arrange.pc_histogram."""
+    times, chroma = _band_chroma(other, bass)
+
+    def harmony(total: float, slot: float) -> np.ndarray:
+        n = int(np.ceil(total / slot))
+        edges = np.searchsorted(times, [to_sec(k * slot) for k in range(n + 1)])
+        w = np.zeros((n, 12))
+        for k in range(n):
+            if edges[k + 1] > edges[k]:
+                w[k] = chroma[:, edges[k]:edges[k + 1]].mean(axis=1) * slot
+        return w
+
+    return harmony
+
+
+@lru_cache(maxsize=2)
+def _structure_features(mix: Path) -> tuple[np.ndarray, np.ndarray, int]:
+    """(CQT in dB, MFCC, sample rate) of the recording, at a 512-sample hop."""
+    import librosa
+
+    y, sr = librosa.load(str(mix), sr=22050, mono=True)
+    cqt = librosa.amplitude_to_db(np.abs(librosa.cqt(y=y, sr=sr, bins_per_octave=36, n_bins=252)), ref=np.max)
+    return cqt, librosa.feature.mfcc(y=y, sr=sr), sr
+
+
+@lru_cache(maxsize=8)
+def song_sections(mix: Path, beats: tuple[float, ...], k: int = 5, min_beats: int = 16) -> np.ndarray:
+    """Section label per beat (0..k-1): passages that sound alike (chords, timbre) share a label,
+    so a chorus gets the same label every time it comes back. Laplacian structural segmentation
+    (McFee & Ellis 2014) on beat-synchronous CQT and MFCC; sections under `min_beats` merge into
+    the one before."""
+    import librosa
+    import scipy.ndimage
+    import scipy.sparse.csgraph
+    from sklearn.cluster import KMeans
+
+    cqt, mfcc, sr = _structure_features(mix)
+    frames = librosa.time_to_frames(np.array(beats), sr=sr, hop_length=512)
+    csync = librosa.util.sync(cqt, frames, aggregate=np.median)
+    rec = librosa.segment.recurrence_matrix(csync, width=3, mode="affinity", sym=True)
+    rec = librosa.segment.timelag_filter(scipy.ndimage.median_filter)(rec, size=(1, 7))
+    msync = librosa.util.sync(mfcc, frames)
+    dist = np.sum(np.diff(msync, axis=1) ** 2, axis=0)
+    sim = np.exp(-dist / np.median(dist))
+    path = np.diag(sim, k=1) + np.diag(sim, k=-1)
+    d_path, d_rec = path.sum(axis=1), rec.sum(axis=1)
+    mu = d_path.dot(d_path + d_rec) / np.sum((d_path + d_rec) ** 2)
+    lap = scipy.sparse.csgraph.laplacian(mu * rec + (1 - mu) * path, normed=True)
+    _, vecs = np.linalg.eigh(lap)
+    vecs = scipy.ndimage.median_filter(vecs, size=(9, 1))
+    norm = np.cumsum(vecs ** 2, axis=1) ** 0.5
+    x = vecs[:, :k] / (norm[:, k - 1:k] + 1e-9)
+    labels = KMeans(n_clusters=k, n_init=10, random_state=0).fit_predict(x)[1:len(beats)]  # col 0: before beat 1
+    i = 0
+    while i < len(labels):  # short sections are fragments of their neighbour
+        j = i
+        while j < len(labels) and labels[j] == labels[i]:
+            j += 1
+        if j - i < min_beats and i > 0:
+            labels[i:j] = labels[i - 1]
+        i = j
+    return labels
+

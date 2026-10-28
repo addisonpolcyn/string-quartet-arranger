@@ -469,7 +469,44 @@ def balance(parts: list[np.ndarray], sr: int, target: float) -> tuple[float, flo
     return ahead, max(-BALANCE_CUT, min(0.0, ahead - target))
 
 
-def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0) -> None:
+SLIP_AFTER_REST, SLIP_IN_LINE = 0.35, 0.12  # chance a note's attack slips: entries are loosest
+SLIP_SETTLE = 0.5  # share of a slip still left on the next note: players find each other again
+SLIP_XFADE = 0.01  # s: the crossfade between offsets, ending just before the attack
+
+
+def note_slips(onsets: list[tuple[float, bool]], ms: float, rng) -> np.ndarray:
+    """Timing offset (s) for each note of one player: mostly together (within ~1 ms); now and
+    then an attack slips by up to `ms`, more often entering after a rest, and the slip settles
+    over the next few notes."""
+    out, prev = [], 0.0
+    for _, after_rest in onsets:
+        slip = rng.random() < (SLIP_AFTER_REST if after_rest else SLIP_IN_LINE)
+        d = SLIP_SETTLE * prev + (rng.normal(0, ms / 2) if slip else rng.normal(0, 0.5))
+        prev = float(np.clip(d, -ms, ms))
+        out.append(prev / 1000)
+    return np.array(out)
+
+
+def slipped(x: np.ndarray, sr: int, onsets: list[tuple[float, bool]], ms: float, rng) -> np.ndarray:
+    """One player's render with each attack moved by its slip. The offset changes in a short
+    crossfade just before each attack, while both readings still hold the previous note, so
+    there's no click and no pitch bend."""
+    times = np.array([t for t, _ in onsets])
+    slips = note_slips(onsets, ms, rng)
+    n, idx = len(x), np.arange(len(x), dtype=float)
+    cur, prev, w = np.zeros(n), np.zeros(n), np.ones(n)
+    last = 0.0
+    for t, d in zip(times, slips):
+        a = int(max(0.0, t + min(last, d) - SLIP_XFADE - 0.002) * sr)
+        b = min(n, a + int(SLIP_XFADE * sr))
+        cur[a:], prev[a:] = d, last
+        w[a:b] = np.linspace(0, 1, b - a)
+        last = d
+    read = lambda delay: np.stack([fractional_read(x[:, c], idx - delay * sr) for c in range(x.shape[1])], axis=1)
+    return read(cur) * w[:, None] + read(prev) * (1 - w[:, None])
+
+
+def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0, onsets=None) -> None:
     """Four players never land exactly together: each part drifts slowly against the others, by
     up to `ms`. MuseScore ignores per-note timing written into a project, so the parts are
     rendered one at a time, each shifted along its own slow random curve (20-40 s swings, so the
@@ -477,7 +514,9 @@ def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0) -> 
     gets alone, so the mix takes on the full render's moment-to-moment gain.
     `lead_ahead` (dB, 0 = off): where violin I sits less than this far above the other three
     (a busy accompaniment, like fingerpicking copied into the inner voices), they come down by
-    one fixed amount for the whole song, as a mixing engineer would set the faders."""
+    one fixed amount for the whole song, as a mixing engineer would set the faders.
+    `onsets` (per part, (seconds, after a rest) per note): instead of drifting, the players are
+    together and slip on single notes, then find each other again (see note_slips)."""
     import soundfile as sf
     from scipy.ndimage import uniform_filter1d
 
@@ -496,6 +535,9 @@ def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0) -> 
     for i, p in enumerate(parts):
         if i and cut:
             p = p * 10 ** (cut / 20)
+        if onsets:
+            mix += slipped(p, sr, onsets[i], ms, rng)
+            continue
         swings = [np.sin(2 * np.pi * t / rng.uniform(20, 40) + rng.uniform(0, 2 * np.pi)) for _ in range(3)]
         drift = 0.5 * rng.uniform(-1, 1) + 0.5 * np.mean(swings, axis=0)  # within -1..1
         at = idx - drift * ms / 1000 * sr
@@ -509,12 +551,13 @@ def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0) -> 
 
 
 def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
-                 lead_ahead: float = 0.0, tunings: list[list[float]] | None = None) -> str | None:
+                 lead_ahead: float = 0.0, tunings: list[list[float]] | None = None,
+                 onsets=None) -> str | None:
     """Render the preview: MuseScore plays the score (with Muse Sounds when installed, and it
     follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran.
     `humanize` (ms, MuseScore only): the players drift apart by up to this much, and with
     `lead_ahead` the accompaniment comes down under the tune (see loosen). `tunings`: cents
-    per note per part (see intonation)."""
+    per note per part (see intonation); `onsets`: per-note slips instead of drift (see loosen)."""
     mscore = next((p for p in MUSESCORE if p and Path(p).exists()), None)
     if mscore:
         def native(p: Path) -> str:  # a Windows MuseScore under WSL needs Windows paths
@@ -541,7 +584,7 @@ def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
         project.unlink(missing_ok=True)
         if done.returncode == 0 and wav.exists():
             if stems and all(p.exists() for p in stems):
-                loosen(wav, stems, humanize, lead_ahead)
+                loosen(wav, stems, humanize, lead_ahead, onsets)
             for p in stems:
                 p.unlink(missing_ok=True)
             return "MuseScore"
@@ -631,8 +674,38 @@ def phrase_swell(n: int, sr: int, phrases, depth_db: float) -> np.ndarray:
     return g
 
 
+ROOM_IRS = {  # room -> (impulse response recorded there, wet share): Voxengo's free IR pack
+    "studio": ("French 18th Century Salon.wav", 0.15),  # a real chamber-music salon, just a touch
+    "hall": ("Musikvereinsaal.wav", 0.22),  # Vienna's hall, famous for strings
+    "church": ("St Nicolaes Church.wav", 0.32),
+}
+
+
+def room_response(room: str, sr: int, irs: Path | None) -> tuple[np.ndarray, float] | None:
+    """(stereo impulse response, wet share) for `room`: recorded in a real space when `irs` holds
+    it (ROOM_IRS), else ROOMS' decaying, slightly dark noise; None for no room."""
+    import soundfile as sf
+    from scipy.signal import butter, lfilter, resample_poly
+
+    if irs and room in ROOM_IRS and (irs / ROOM_IRS[room][0]).exists():
+        ir, ir_sr = sf.read(str(irs / ROOM_IRS[room][0]), always_2d=True)
+        if ir_sr != sr:
+            ir = resample_poly(ir, sr, ir_sr, axis=0)
+        ir = np.repeat(ir, 2, axis=1) if ir.shape[1] == 1 else ir[:, :2]
+        wet = ROOM_IRS[room][1]
+    elif ROOMS.get(room):
+        decay, wet = ROOMS[room]
+        t = np.arange(int(decay * sr)) / sr
+        tail = np.random.default_rng(0).standard_normal((len(t), 2)) * 10 ** (-3 * t / decay)[:, None]
+        tail = lfilter(*butter(2, 6000 / (sr / 2)), tail, axis=0)  # air absorbs the highs
+        ir = np.vstack([np.zeros((int(0.02 * sr), 2)), tail])  # 20 ms before the first echo
+    else:
+        return None
+    return ir / np.sqrt((ir ** 2).sum(axis=0)), wet
+
+
 def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False,
-             contour=None, swells=(), swell_db: float = 0.0) -> None:
+             contour=None, swells=(), swell_db: float = 0.0, irs: Path | None = None) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
     noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95).
     `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level).
@@ -640,25 +713,22 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
     music stopping dead where the render ends. `swells` ((start, peak, end) seconds per sung
     phrase): the whole quartet swells `swell_db` up to each phrase's peak and back, together, so
     the balance never changes (Muse Sounds plays a written hairpin a full dynamic level, ~6 dB,
-    which buried the tune at every phrase end)."""
+    which buried the tune at every phrase end). `irs`: a folder of recorded impulse responses
+    (ROOM_IRS), for a real room instead of the noise one."""
     import numpy as np
     import soundfile as sf
-    from scipy.signal import butter, fftconvolve, lfilter
+    from scipy.signal import fftconvolve, lfilter
 
     y, sr = sf.read(str(wav), always_2d=True)
     if y.shape[1] == 1:
         y = np.repeat(y, 2, axis=1)
     end = music_end(y, sr)
-    ring = (ROOMS[room][0] if ROOMS.get(room) else 0.0) + 0.5
+    response = room_response(room, sr, irs)
+    ring = (len(response[0]) / sr if response else 0.0) + 0.5
     y = np.vstack([y, np.zeros((int(ring * sr), 2))])  # room for the reverb's tail
     out = y
-    if ROOMS.get(room):
-        decay, wet = ROOMS[room]
-        t = np.arange(int(decay * sr)) / sr
-        tail = np.random.default_rng(0).standard_normal((len(t), 2)) * 10 ** (-3 * t / decay)[:, None]
-        tail = lfilter(*butter(2, 6000 / (sr / 2)), tail, axis=0)  # air absorbs the highs
-        ir = np.vstack([np.zeros((int(0.02 * sr), 2)), tail])  # 20 ms before the first echo
-        ir /= np.sqrt((ir ** 2).sum(axis=0))
+    if response:
+        ir, wet = response
         room_y = np.stack([fftconvolve(y[:, c], ir[:, c])[:len(y)] for c in range(2)], axis=1)
         room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
         out = (1 - wet) * y + wet * room_y
