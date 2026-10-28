@@ -97,7 +97,7 @@ different arrangement options takes seconds.
 | `--expression` / `--no-expression` | on | slurs over connected notes (one bow), pizzicato inner voices in the quietest verses, a swell to the top of each sung phrase |
 | `--room` | auto | reverb for the preview: `studio` (only the samples' own room), `hall` (~1.8 s), `church` (~3.2 s); `auto` picks by how much of the song has drums: church under 30% (ballads), hall under 45%, studio above |
 | `--max-repeat` | 0.3 | fastest same-note re-attack in seconds; quicker repeats merge into one note (samples repeat identically, a "machine gun"; 0 = off) |
-| `--lift` / `--no-lift` | on | the last loudest section: violin II doubles the tune an octave below |
+| `--lift` / `--no-lift` | off | the last loudest section: violin II doubles the tune an octave below |
 | `--counter` / `--no-counter` | on | where the singer rests, violin II answers with the band's own hook |
 | `--ending` / `--no-ending` | on | a 2-bar ritardando into a held final chord under a fermata |
 | `--accents` / `--no-accents` | on | inner voices accent the backbeat (2 and 4) and play quick notes short |
@@ -105,8 +105,11 @@ different arrangement options takes seconds.
 | `--master` / `--no-master` | on | preview only: EQ (less low-mid mud, 3 dB less edge at 3.5 kHz, a touch of air) and a louder, limited level |
 | `--release` / `--no-release` | on | preview only: ready for Spotify and other streaming services at `--lufs`, true peaks under -1 dBTP, dead air trimmed, 24-bit / 44.1 kHz |
 | `--lufs` | -18 | release loudness: Spotify plays at -14, Apple Music at -16 (both sounded too loud next to everything else) |
-| `--ride` | song | preview only: the leveler steers the quartet along the recording's own loudness (13% of its range), so choruses keep their lift; `flat` evens everything to one level |
-| `--ride-amount` | 0.13 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
+| `--swells` | mix | a swell up to the top of each sung phrase: `mix` = the whole quartet together by `--swell-db` (1.5 dB) in the preview; `score` = violin I hairpins (Muse Sounds plays them ~6 dB, burying the tune); `off` |
+| `--ride` | song | preview only: the leveler steers the quartet along the recording's own loudness (20% of its range), so choruses keep their lift; `flat` evens everything to one level |
+| `--ride-amount` | 0.2 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
+| `--lead-ahead` | 2 | preview only: if violin I sits less than this many dB over the other three (a busy accompaniment), turn them down for the song to get it there, at most 8 dB |
+| `--intonation` / `--no-intonation` | on | preview only: tune notes the way a quartet does (major 3rds 10 cents low, minor 3rds 8 high, the tune's leading tone 10 sharp, ~4 cents of spread) instead of dead in tune |
 | `--humanize` | 10 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
 | `--speed` | 1.0 | play the quartet at this share of the recording's tempo (0.85 = 15% slower) |
 | `--vary` / `--no-vary` | on | first verse sparse (held chords, no answers), so later verses and choruses build |

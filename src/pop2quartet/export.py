@@ -174,10 +174,11 @@ def preview_seconds(beats, bpm: float, marks: list) -> np.ndarray:
 def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: str,
                    chords=(), plan=None, expression: bool = True, ending: bool = False,
                    accents: bool = False, rubato: bool = False, slides: bool = False,
-                   tempo_marks: list | None = None) -> str:
+                   tempo_marks: list | None = None, swells: bool = True) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
-    `expression`: slurs, pizzicato verses for the inner voices, and a swell over each sung phrase.
+    `expression`: slurs, pizzicato verses for the inner voices, and (with `swells`) a swell over
+    each sung phrase.
     `ending`: everyone holds the last chord together, under a fermata, after a 2-bar ritardando.
     `accents`: the inner voices lean on the backbeat (2 and 4) and play quick notes short.
     `rubato` (for the audio preview; it fills the score with tempo marks): the tempo gives a
@@ -267,7 +268,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                     part.insert(notes[i + 1].start, expressions.TextExpression("arco"))
             for g in slur_groups(notes, plucked):
                 part.insert(0, spanner.Slur([placed[i][1] for i in g]))
-            if k == "vln1":
+            if k == "vln1" and swells:
                 for a, peak, b in phrase_arcs(notes, busy):
                     part.insert(0, dynamics.Crescendo(placed[a][1], placed[peak][1]))
                     part.insert(0, dynamics.Diminuendo(placed[peak][1], placed[b][1]))
@@ -326,10 +327,65 @@ MUSE_SOLOISTS = [
 PLAYING = {"pizz.": "pizzicato", "arco": "normal"}  # MuseScore's playing-technique names
 
 
-def prepare_project(mscz: Path) -> None:
+INTONATION = {4: -10.0, 3: 8.0, 7: 2.0, 10: -8.0}  # cents, by interval above the chord's root:
+# players lower a major 3rd and raise a minor 3rd toward pure intervals, lean a 7th low
+LEADING_TONE = 10.0  # cents sharp: the tune's 7th degree pulls up toward the tonic
+INTONATION_SPREAD = 4.0  # cents: nobody plays the same note exactly in tune twice
+
+
+def intonation(parts: dict[str, list[Note]], chords, seed: int = 0) -> dict[str, list[float]]:
+    """Cents off equal temperament for every note, the way a quartet tunes: by its place in the
+    chord sounding at the time (INTONATION), the tune's leading tone sharp, and a small random
+    spread per note. Muse Sounds otherwise plays every note dead in tune, a giveaway."""
+    from bisect import bisect_right
+
+    tonic = NAMES.index(detect_key(parts)[0])
+    beats = [b for b, _ in chords]
+    rng = np.random.default_rng(seed)
+    out = {}
+    for k, ns in parts.items():
+        cents = []
+        for n in ns:
+            i = bisect_right(beats, n.start) - 1
+            c = INTONATION.get((n.pitch - chords[i][1][0]) % 12, 0.0) if i >= 0 else 0.0
+            if k == "vln1" and (n.pitch - tonic) % 12 == 11:
+                c = LEADING_TONE
+            cents.append(float(np.clip(c + rng.normal(0, INTONATION_SPREAD), -18, 18)))
+        out[k] = cents
+    return out
+
+
+def tune_notes(mscx: str, tunings: list[list[float]]) -> str:
+    """Write each staff's cents onto its notes, in order; a tied continuation keeps its note's
+    tuning. A staff whose note count doesn't match is left in equal temperament."""
+    starts = [m.start() for m in re.finditer(r'\n    <Staff id="\d+">', mscx)] + [len(mscx)]
+    out = [mscx[:starts[0]]]
+    for k, (a, b) in enumerate(zip(starts, starts[1:])):
+        staff, cents = mscx[a:b], tunings[k] if k < len(tunings) else []
+        notes = list(re.finditer(r"<Note>.*?</Note>", staff, re.S))
+        tied = [bool(re.search(r'<Spanner type="Tie">\s*<prev>', m[0])) for m in notes]
+        if sum(not t for t in tied) != len(cents):
+            print(f"[export] intonation: staff {k + 1} has {sum(not t for t in tied)} notes, "
+                  f"expected {len(cents)}; left in equal temperament")
+            out.append(staff)
+            continue
+        pieces, at, i, c = [], 0, -1, 0.0
+        for m, t in zip(notes, tied):
+            if not t:
+                i += 1
+                c = cents[i]
+            tuned = re.sub(r"(<pitch>\d+</pitch>)", rf"\1<tuning>{c:.1f}</tuning>", m[0], count=1)
+            pieces += [staff[at:m.start()], tuned]
+            at = m.end()
+        out.append("".join(pieces) + staff[at:])
+    return "".join(out)
+
+
+def prepare_project(mscz: Path, tunings: list[list[float]] | None = None) -> None:
     """Set up a MuseScore project converted from our MusicXML: each part's player and seat
     (MUSE_SOLOISTS, parts 1-4 in score order), and "pizz."/"arco", which MusicXML import leaves
-    as plain text, turned into playing techniques so the sound changes."""
+    as plain text, turned into playing techniques so the sound changes. `tunings`: cents per
+    note for each part, in score order (see intonation); MusicXML can't carry them."""
     with zipfile.ZipFile(mscz) as z:
         files = {n: z.read(n) for n in z.namelist()}
     for n in files:
@@ -339,6 +395,8 @@ def prepare_project(mscz: Path) -> None:
                 lambda m: f"<PlayTechAnnotation>{m[1] or ''}<playTechType>{PLAYING[m[2]]}"
                           f"</playTechType><text>{m[2]}</text></PlayTechAnnotation>",
                 files[n].decode()).encode()
+            if tunings:
+                files[n] = tune_notes(files[n].decode(), tunings).encode()
     settings = json.loads(files.get("audiosettings.json", b"{}") or b"{}")
     settings["activeSoundProfile"] = "MuseSounds"
     settings["tracks"] = [{
@@ -397,12 +455,29 @@ def fractional_read(x: np.ndarray, at: np.ndarray, taps: int = 32) -> np.ndarray
     return out
 
 
-def loosen(wav: Path, stems: list[Path], ms: float) -> None:
+BALANCE_CUT = 8.0  # dB: the most --lead-ahead turns the accompaniment down
+
+
+def balance(parts: list[np.ndarray], sr: int, target: float) -> tuple[float, float]:
+    """How far violin I (parts[0]) sits above the other three together, median over the seconds it
+    plays, and the fixed gain (dB, <= 0) for the other three that brings it to `target`."""
+    sec = len(parts[0]) // sr
+    lv = np.array([[10 * np.log10(np.mean(p[t * sr:(t + 1) * sr] ** 2) + 1e-12) for t in range(sec)]
+                   for p in parts])
+    rest = 10 * np.log10(sum(10 ** (lv[i] / 10) for i in range(1, len(parts))))
+    ahead = float(np.median((lv[0] - rest)[lv[0] > lv[0].max() - 35]))
+    return ahead, max(-BALANCE_CUT, min(0.0, ahead - target))
+
+
+def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0) -> None:
     """Four players never land exactly together: each part drifts slowly against the others, by
     up to `ms`. MuseScore ignores per-note timing written into a project, so the parts are
     rendered one at a time, each shifted along its own slow random curve (20-40 s swings, so the
     pitch moves < 3 cents), and mixed. MuseScore's engine compresses the full mix, which no part
-    gets alone, so the mix takes on the full render's moment-to-moment gain."""
+    gets alone, so the mix takes on the full render's moment-to-moment gain.
+    `lead_ahead` (dB, 0 = off): where violin I sits less than this far above the other three
+    (a busy accompaniment, like fingerpicking copied into the inner voices), they come down by
+    one fixed amount for the whole song, as a mixing engineer would set the faders."""
     import soundfile as sf
     from scipy.ndimage import uniform_filter1d
 
@@ -410,10 +485,17 @@ def loosen(wav: Path, stems: list[Path], ms: float) -> None:
     parts = [sf.read(str(p), always_2d=True, dtype="float32")[0] for p in stems]
     n = min(len(y), *map(len, parts))
     y, parts = y[:n], [p[:n] for p in parts]
+    cut = 0.0
+    if lead_ahead:
+        ahead, cut = balance([p.mean(axis=1) for p in parts], sr, lead_ahead)
+        print(f"[export] violin I sits {ahead:+.1f} dB over the others; "
+              + (f"they come down {-cut:.1f} dB" if cut else "balance left alone"))
     rng = np.random.default_rng(0)
     t, idx = np.arange(n) / sr, np.arange(n, dtype=float)
     mix = np.zeros_like(y)
-    for p in parts:
+    for i, p in enumerate(parts):
+        if i and cut:
+            p = p * 10 ** (cut / 20)
         swings = [np.sin(2 * np.pi * t / rng.uniform(20, 40) + rng.uniform(0, 2 * np.pi)) for _ in range(3)]
         drift = 0.5 * rng.uniform(-1, 1) + 0.5 * np.mean(swings, axis=0)  # within -1..1
         at = idx - drift * ms / 1000 * sr
@@ -426,10 +508,13 @@ def loosen(wav: Path, stems: list[Path], ms: float) -> None:
     sf.write(str(wav), mix * (env(y) / env(sum(parts)))[:, None], sr, subtype="FLOAT")
 
 
-def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0) -> str | None:
+def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
+                 lead_ahead: float = 0.0, tunings: list[list[float]] | None = None) -> str | None:
     """Render the preview: MuseScore plays the score (with Muse Sounds when installed, and it
     follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran.
-    `humanize` (ms, MuseScore only): the players drift apart by up to this much (see loosen)."""
+    `humanize` (ms, MuseScore only): the players drift apart by up to this much, and with
+    `lead_ahead` the accompaniment comes down under the tune (see loosen). `tunings`: cents
+    per note per part (see intonation)."""
     mscore = next((p for p in MUSESCORE if p and Path(p).exists()), None)
     if mscore:
         def native(p: Path) -> str:  # a Windows MuseScore under WSL needs Windows paths
@@ -442,11 +527,11 @@ def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0) -> s
         with one_at_a_time():
             made = subprocess.run([mscore, "-o", native(project), native(score)], capture_output=True)
             if made.returncode == 0 and project.exists():
-                prepare_project(project)
+                prepare_project(project, tunings)
                 score = project
             done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
             stems = []
-            if humanize and score == project and done.returncode == 0:
+            if (humanize or lead_ahead) and score == project and done.returncode == 0:
                 for k in range(len(MUSE_SOLOISTS)):
                     solo, stem = project.with_name(f".solo{k}.mscz"), wav.with_name(f".{wav.stem}{k}.wav")
                     solo_project(project, solo, k)
@@ -456,7 +541,7 @@ def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0) -> s
         project.unlink(missing_ok=True)
         if done.returncode == 0 and wav.exists():
             if stems and all(p.exists() for p in stems):
-                loosen(wav, stems, humanize)
+                loosen(wav, stems, humanize, lead_ahead)
             for p in stems:
                 p.unlink(missing_ok=True)
             return "MuseScore"
@@ -533,13 +618,29 @@ def music_end(y: np.ndarray, sr: int) -> int:
     return min(len(y), (int(np.nonzero(db > typical - 20)[0][-1]) + 1) * hop)
 
 
+def phrase_swell(n: int, sr: int, phrases, depth_db: float) -> np.ndarray:
+    """Gain (dB) per sample: up `depth_db` from each (start, peak, end) phrase's start to its peak
+    and back down by its end, on cosine curves."""
+    g = np.zeros(n)
+    for s, p, e in phrases:
+        s, p, e = (min(n, int(x * sr)) for x in (s, p, e))
+        if s < p:
+            g[s:p] = np.maximum(g[s:p], depth_db * (1 - np.cos(np.linspace(0, np.pi, p - s))) / 2)
+        if p < e:
+            g[p:e] = np.maximum(g[p:e], depth_db * (1 + np.cos(np.linspace(0, np.pi, e - p))) / 2)
+    return g
+
+
 def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False,
-             contour=None) -> None:
+             contour=None, swells=(), swell_db: float = 0.0) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
     noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95).
     `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level).
     The last chord fades over FADE seconds and the room rings out after it, instead of the
-    music stopping dead where the render ends."""
+    music stopping dead where the render ends. `swells` ((start, peak, end) seconds per sung
+    phrase): the whole quartet swells `swell_db` up to each phrase's peak and back, together, so
+    the balance never changes (Muse Sounds plays a written hairpin a full dynamic level, ~6 dB,
+    which buried the tune at every phrase end)."""
     import numpy as np
     import soundfile as sf
     from scipy.signal import butter, fftconvolve, lfilter
@@ -562,7 +663,9 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
         room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
         out = (1 - wet) * y + wet * room_y
     out = ride_level(out, sr) if contour is None else ride_level(out, sr, target=contour)
-    # after the leveler, which would otherwise ride the fade back up
+    # after the leveler, which would otherwise ride the swells and the fade back out
+    if swells and swell_db:
+        out = out * 10 ** (phrase_swell(len(out), sr, swells, swell_db) / 20)[:, None]
     start = max(0, end - int(FADE * sr))
     fade = np.ones(len(out))
     fade[start:end] = 10 ** (FADE_TO / 20 * (1 - np.cos(np.linspace(0, np.pi, end - start))) / 2)

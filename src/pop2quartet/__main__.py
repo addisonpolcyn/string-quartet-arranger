@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 
 from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
-from .export import (RELEASE_LUFS, ROOMS, add_room, master_for_release, preview_seconds, render_audio,
-                     room_for, write_midi, write_musicxml)
+from .export import (PARTS, RELEASE_LUFS, ROOMS, add_room, intonation, master_for_release,
+                     phrase_arcs, preview_seconds, render_audio, room_for, write_midi, write_musicxml)
 from .quality import WEIGHTS, evaluate
 from .separate import separate
 from .transcribe import (Note, beat_loudness, chroma_repair, drum_activity, drum_pattern,
@@ -74,8 +74,10 @@ def bpm_of(beat_times: np.ndarray) -> float:
     return 60.0 / float(np.median(np.diff(beat_times)))
 
 
-SONG_RIDE = 0.13  # --ride song: the quartet's loudness moves this share as far as the recording's
-# (0.6, 0.35 and 0.23 faded too much; 0.13 was picked in an A/B)
+SWELL_DB = 1.5  # --swells mix: gentle; the score's hairpins moved the tune ~6 dB
+
+SONG_RIDE = 0.2  # --ride song: the quartet's loudness moves this share as far as the recording's
+# (0.6, 0.35 and 0.23 faded too much while hairpins buried the tune; with gentle mix swells, 0.2)
 
 
 def song_contour(loud: np.ndarray, tempo: float, marks: list,
@@ -150,7 +152,7 @@ def main() -> None:
     ap.add_argument("--max-repeat", type=float, default=0.3,
                     help="fastest same-note re-attack, in seconds: quicker repeats merge into one "
                          "note, as samples repeat identically (0 = off)")
-    ap.add_argument("--lift", action=argparse.BooleanOptionalAction, default=True,
+    ap.add_argument("--lift", action=argparse.BooleanOptionalAction, default=False,
                     help="last loudest section: violin II doubles the tune an octave below")
     ap.add_argument("--counter", action=argparse.BooleanOptionalAction, default=True,
                     help="violin II answers the tune with the band's hook where the singer rests")
@@ -181,7 +183,19 @@ def main() -> None:
                     help="play the quartet at this share of the recording's tempo (0.85 = 15%% slower)")
     ap.add_argument("--ride-amount", type=float, default=SONG_RIDE,
                     help="--ride song: how far the quartet follows the recording's loudness changes "
-                         "(0.13 = 13%% as far; 0 = as flat as possible)")
+                         "(0.2 = 20%% as far; 0 = as flat as possible)")
+    ap.add_argument("--swells", choices=["mix", "score", "off"], default="mix",
+                    help="a swell up to the top of each sung phrase and back: mix = the whole quartet "
+                         "together by --swell-db in the preview's mix; score = violin I hairpins, which "
+                         "Muse Sounds plays a full dynamic level (~6 dB) and buried the tune; off")
+    ap.add_argument("--swell-db", type=float, default=SWELL_DB,
+                    help="--swells mix: how far the quartet swells at a phrase's peak, in dB")
+    ap.add_argument("--lead-ahead", type=float, default=2.0,
+                    help="preview only: if violin I sits less than this many dB over the other three "
+                         "(a busy accompaniment), turn them down for the song to get it there (0 = off)")
+    ap.add_argument("--intonation", action=argparse.BooleanOptionalAction, default=True,
+                    help="preview only: tune notes the way a quartet does (thirds toward pure, the "
+                         "leading tone sharp, a few cents of spread) instead of dead in tune")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -245,7 +259,7 @@ def main() -> None:
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
     key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
-                         args.expression, args.ending, args.accents)
+                         args.expression, args.ending, args.accents, swells=args.swells != "off")
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
@@ -253,13 +267,20 @@ def main() -> None:
         bare = out / ".preview.musicxml"
         marks = []
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
-                       args.accents, args.rubato, args.slides, marks)
-        how = render_audio(bare, midi, out / "preview.wav", args.humanize)
+                       args.accents, args.rubato, args.slides, marks, args.swells == "score")
+        tunings = intonation(parts, chords) if args.intonation else None
+        how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
+                           [tunings[k] for k, *_ in PARTS] if tunings else None)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
             contour = song_contour(loud, tempo, marks, args.ride_amount) if args.ride == "song" else None
-            add_room(out / "preview.wav", room, master=args.master, contour=contour)
+            tune = parts["vln1"]
+            phrases = [tuple(preview_seconds(np.array([tune[a].start, tune[p].start, tune[b].end]),
+                                             tempo, marks))
+                       for a, p, b in phrase_arcs(tune, [])] if args.swells == "mix" else []
+            add_room(out / "preview.wav", room, master=args.master, contour=contour, swells=phrases,
+                     swell_db=args.swell_db)
             level = ""
             if args.release:
                 lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav", args.lufs)
