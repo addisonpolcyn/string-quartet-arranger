@@ -102,9 +102,16 @@ different arrangement options takes seconds.
 | `--ending` / `--no-ending` | on | a 2-bar ritardando into a held final chord under a fermata |
 | `--accents` / `--no-accents` | on | inner voices accent the backbeat (2 and 4) and play quick notes short |
 | `--rubato` / `--no-rubato` | on | preview only: the tempo gives a little at the end of each sung phrase |
-| `--master` / `--no-master` | on | preview only: EQ (less low-mid mud, a touch of air) and a louder, limited level |
-| `--release` / `--no-release` | on | preview only: ready for Spotify and other streaming services at -14 LUFS, true peaks under -1 dBTP, dead air trimmed, 24-bit / 44.1 kHz |
-| `--auto` / `--no-auto` | on | try the tempo as detected, half and double, grid 0.25/0.5 and harmony slot 1/2 (any you set yourself stay fixed), score each arrangement and keep the best |
+| `--master` / `--no-master` | on | preview only: EQ (less low-mid mud, 3 dB less edge at 3.5 kHz, a touch of air) and a louder, limited level |
+| `--release` / `--no-release` | on | preview only: ready for Spotify and other streaming services at `--lufs`, true peaks under -1 dBTP, dead air trimmed, 24-bit / 44.1 kHz |
+| `--lufs` | -18 | release loudness: Spotify plays at -14, Apple Music at -16 (both sounded too loud next to everything else) |
+| `--ride` | song | preview only: the leveler steers the quartet along the recording's own loudness (13% of its range), so choruses keep their lift; `flat` evens everything to one level |
+| `--ride-amount` | 0.13 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
+| `--humanize` | 10 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
+| `--speed` | 1.0 | play the quartet at this share of the recording's tempo (0.85 = 15% slower) |
+| `--vary` / `--no-vary` | on | first verse sparse (held chords, no answers), so later verses and choruses build |
+| `--slides` / `--no-slides` | on | preview only: violin I slides up into a held note after a leap, like a singer |
+| `--auto` / `--no-auto` | on | try the tempo as detected, half and double (never above 160 BPM: faster is double time, frantic on strings), grid 0.25/0.5 and harmony slot 1/2 (any you set yourself stay fixed), score each arrangement and keep the best |
 | `--grid` | auto (0.25) | rhythmic quantization in beats (0.5 = simpler, eighth-note rhythms) |
 | `--harmony-slot` | auto (1) | how often the inner voices may change chord; they hold notes while the harmony allows |
 | `--min-note` | 0.25 | clean-up: fold notes/rests shorter than this (in beats) into neighbours and fix octave jumps; `0` keeps every detail |

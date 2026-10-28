@@ -141,18 +141,52 @@ def phrase_arcs(notes: list[Note], busy: list[tuple[float, float]], breath: floa
     return arcs
 
 
+SLIDE = 0.25  # beats a slide takes, at the end of the note it leaves
+SLIDE_LEAP = (4, 12)  # semitones up: from a major 3rd to an octave
+SLIDE_EVERY = 8.0  # beats: at most one slide per two bars, so it stays a gesture
+
+
+def slide_notes(notes: list[Note]) -> set[int]:
+    """Indices of tune notes that slide up into the next one, the way a singer scoops: the next
+    note follows without a rest, a leap of SLIDE_LEAP up, both notes held a beat or more."""
+    out, last = set(), -SLIDE_EVERY
+    for i, (a, b) in enumerate(zip(notes, notes[1:])):
+        if (abs(a.end - b.start) < 1e-6 and SLIDE_LEAP[0] <= b.pitch - a.pitch <= SLIDE_LEAP[1]
+                and a.end - a.start >= 1 and b.end - b.start >= 1 and a.start - last >= SLIDE_EVERY):
+            out.add(i)
+            last = a.start
+    return out
+
+
+def preview_seconds(beats, bpm: float, marks: list) -> np.ndarray:
+    """Where beats fall in the rendered preview, following its hidden (beat, factor) tempo marks."""
+    at_b, at_t, b0, f, t = [0.0], [0.0], 0.0, 1.0, 0.0
+    for b, nf in sorted(marks):
+        t += (b - b0) * 60 / (round(bpm) * f)
+        at_b.append(b)
+        at_t.append(t)
+        b0, f = b, nf
+    at_b.append(b0 + 1e4)
+    at_t.append(t + 1e4 * 60 / (round(bpm) * f))
+    return np.interp(beats, at_b, at_t)
+
+
 def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: str,
                    chords=(), plan=None, expression: bool = True, ending: bool = False,
-                   accents: bool = False, rubato: bool = False) -> str:
+                   accents: bool = False, rubato: bool = False, slides: bool = False,
+                   tempo_marks: list | None = None) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
     `expression`: slurs, pizzicato verses for the inner voices, and a swell over each sung phrase.
     `ending`: everyone holds the last chord together, under a fermata, after a 2-bar ritardando.
     `accents`: the inner voices lean on the backbeat (2 and 4) and play quick notes short.
     `rubato` (for the audio preview; it fills the score with tempo marks): the tempo gives a
-    little at the end of each sung phrase, as players breathe."""
+    little at the end of each sung phrase, as players breathe.
+    `slides` (for the audio preview): violin I slides up into a held note after a leap, as a
+    singer would (see slide_notes).
+    `tempo_marks`, if given, collects the hidden (beat, tempo factor) changes, to time the audio."""
     from music21 import (articulations, clef, dynamics, expressions, harmony, instrument, metadata,
-                         meter, note, spanner, stream, tempo)
+                         meter, note, spanner, stream, tempo, tie)
     from music21 import key as m21key
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
@@ -165,7 +199,9 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
         parts = {k: ns[:-1] + [Note(ns[-1].start, total, ns[-1].pitch, ns[-1].velocity)]
                  if ns and ns[-1].end >= total - 8 else ns for k, ns in parts.items()}
 
-    def hidden_tempo(factor: float):
+    def hidden_tempo(factor: float, beat: float):
+        if tempo_marks is not None:
+            tempo_marks.append((beat, factor))
         mark = tempo.MetronomeMark(number=round(bpm * factor))
         mark.style.hideObjectOnPrint = True
         return mark
@@ -195,13 +231,23 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
             names = FLAT_NAMES if use_flats else SHARP_NAMES
             for beat, (root, quality) in chords:
                 part.insert(beat, harmony.ChordSymbol(names[root] + SUFFIX[quality]))
-        placed = []
-        for n in parts[k]:
-            m = note.Note(n.pitch, quarterLength=n.end - n.start)
+        placed, tails = [], {}
+        slide = slide_notes(parts[k]) if slides and k == "vln1" else set()
+        for i, n in enumerate(parts[k]):
+            # a slide is played on the note's last moment: Muse Sounds glides through the whole
+            # note it starts on, so the slide starts on a short tied tail
+            head = n.end - n.start - (SLIDE if i in slide else 0)
+            m = note.Note(n.pitch, quarterLength=head)
             if use_flats and m.pitch.accidental is not None and m.pitch.accidental.name == "sharp":
                 m.pitch = m.pitch.getEnharmonic()
             part.insert(n.start, m)
             placed.append((n.start, m))
+            if i in slide:
+                tails[i] = note.Note(m.pitch, quarterLength=SLIDE)
+                m.tie, tails[i].tie = tie.Tie("start"), tie.Tie("stop")
+                part.insert(n.start + head, tails[i])
+        for i, tail in tails.items():
+            part.insert(0, spanner.Glissando([tail, placed[i + 1][1]]))
         busy = []  # beat spans of the section hairpins
         if plan:
             for (s0, _), (s1, _) in zip(plan, plan[1:]):
@@ -247,15 +293,15 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
             notes = parts[k]
             for a, peak, b in phrase_arcs(notes, []):
                 if notes[b].end < total - 8:
-                    part.insert(notes[b].start, hidden_tempo(0.94))
-                    part.insert(notes[b].end, hidden_tempo(1.0))
+                    part.insert(notes[b].start, hidden_tempo(0.94, notes[b].start))
+                    part.insert(notes[b].end, hidden_tempo(1.0, notes[b].end))
         if ending:
             if placed:
                 placed[-1][1].expressions.append(expressions.Fermata())
             if k == "vln1":
                 part.insert(total - 8, expressions.TextExpression("rit."))
                 for i in range(1, 8):  # one step per beat, down to ~70% of the tempo
-                    part.insert(total - 8 + i, hidden_tempo(1 - 0.043 * i))
+                    part.insert(total - 8 + i, hidden_tempo(1 - 0.043 * i, total - 8 + i))
         part.makeRests(refStreamOrTimeRange=[0.0, total], fillGaps=True, inPlace=True)
         part = part.makeMeasures()
         part.makeTies(inPlace=True)
@@ -324,9 +370,66 @@ def one_at_a_time():
         yield
 
 
-def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
+def solo_project(mscz: Path, dst: Path, part: int) -> None:
+    """A copy of a prepared project with every part but `part` (0-3) muted."""
+    with zipfile.ZipFile(mscz) as z:
+        files = {n: z.read(n) for n in z.namelist()}
+    settings = json.loads(files["audiosettings.json"])
+    for i, track in enumerate(settings["tracks"]):
+        track["soloMuteState"]["mute"] = i != part
+    files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
+    with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
+        for n, data in files.items():
+            z.writestr(n, data)
+
+
+def fractional_read(x: np.ndarray, at: np.ndarray, taps: int = 32) -> np.ndarray:
+    """x read at fractional sample positions `at` through a Hann-windowed sinc, which keeps the
+    highs (straight-line interpolation between samples dulls everything above ~8 kHz)."""
+    n = np.floor(at).astype(np.int64)
+    frac = (at - n).astype(np.float32)
+    out = np.zeros(len(at), dtype=np.float32)
+    half = taps // 2
+    for k in range(1 - half, half + 1):
+        d = k - frac
+        w = np.sinc(d) * 0.5 * (1 + np.cos(np.pi * d / half))
+        out += x[np.clip(n + k, 0, len(x) - 1)] * w
+    return out
+
+
+def loosen(wav: Path, stems: list[Path], ms: float) -> None:
+    """Four players never land exactly together: each part drifts slowly against the others, by
+    up to `ms`. MuseScore ignores per-note timing written into a project, so the parts are
+    rendered one at a time, each shifted along its own slow random curve (20-40 s swings, so the
+    pitch moves < 3 cents), and mixed. MuseScore's engine compresses the full mix, which no part
+    gets alone, so the mix takes on the full render's moment-to-moment gain."""
+    import soundfile as sf
+    from scipy.ndimage import uniform_filter1d
+
+    y, sr = sf.read(str(wav), always_2d=True, dtype="float32")
+    parts = [sf.read(str(p), always_2d=True, dtype="float32")[0] for p in stems]
+    n = min(len(y), *map(len, parts))
+    y, parts = y[:n], [p[:n] for p in parts]
+    rng = np.random.default_rng(0)
+    t, idx = np.arange(n) / sr, np.arange(n, dtype=float)
+    mix = np.zeros_like(y)
+    for p in parts:
+        swings = [np.sin(2 * np.pi * t / rng.uniform(20, 40) + rng.uniform(0, 2 * np.pi)) for _ in range(3)]
+        drift = 0.5 * rng.uniform(-1, 1) + 0.5 * np.mean(swings, axis=0)  # within -1..1
+        at = idx - drift * ms / 1000 * sr
+        mix += np.stack([fractional_read(p[:, c], at) for c in range(p.shape[1])], axis=1)
+
+    def env(a):  # over 300 ms: a gain that follows every 10 ms flutters by ~1.3 dB, audible grit
+        return np.sqrt(uniform_filter1d((a ** 2).mean(axis=1), int(0.3 * sr)) + 1e-12)
+
+    # float, so a peak over full scale survives to the mastering stage instead of clipping here
+    sf.write(str(wav), mix * (env(y) / env(sum(parts)))[:, None], sr, subtype="FLOAT")
+
+
+def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0) -> str | None:
     """Render the preview: MuseScore plays the score (with Muse Sounds when installed, and it
-    follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran."""
+    follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran.
+    `humanize` (ms, MuseScore only): the players drift apart by up to this much (see loosen)."""
     mscore = next((p for p in MUSESCORE if p and Path(p).exists()), None)
     if mscore:
         def native(p: Path) -> str:  # a Windows MuseScore under WSL needs Windows paths
@@ -342,8 +445,20 @@ def render_audio(score: Path, midi: Path, wav: Path) -> str | None:
                 prepare_project(project)
                 score = project
             done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
+            stems = []
+            if humanize and score == project and done.returncode == 0:
+                for k in range(len(MUSE_SOLOISTS)):
+                    solo, stem = project.with_name(f".solo{k}.mscz"), wav.with_name(f".{wav.stem}{k}.wav")
+                    solo_project(project, solo, k)
+                    subprocess.run([mscore, "-o", native(stem), native(solo)], capture_output=True)
+                    solo.unlink()
+                    stems.append(stem)
         project.unlink(missing_ok=True)
         if done.returncode == 0 and wav.exists():
+            if stems and all(p.exists() for p in stems):
+                loosen(wav, stems, humanize)
+            for p in stems:
+                p.unlink(missing_ok=True)
             return "MuseScore"
     sf2 = next((p for p in SOUNDFONTS if Path(p).exists()), None)
     if not (shutil.which("fluidsynth") and sf2):
@@ -381,12 +496,14 @@ def _biquad(kind: str, f0: float, gain_db: float, q: float, sr: int):
 
 
 def ride_level(y: np.ndarray, sr: int, ratio: float = 3.0, window: float = 1.0,
-               max_boost: float = 8.0) -> np.ndarray:
+               max_boost: float = 8.0, target=None) -> np.ndarray:
     """Even out the loudness like a mixing engineer riding the faders: the gap between the
     smoothed loudness and the song's typical level shrinks by `ratio`. Muse Sounds takes each
     dynamic mark and every entry of a voice at face value, so the quartet swings ~3x as far as
     the recording. Offline, so the gain eases in around a change instead of lagging it, and
-    near-silence (breaks, the very start and end) is never pulled up."""
+    near-silence (breaks, the very start and end) is never pulled up.
+    `target` ((seconds, dB) points) steers toward a loudness curve, such as the recording's,
+    instead of one steady level, so a chorus keeps its lift; the gain then also moves slowly."""
     hop = int(0.1 * sr)
     frames = np.sqrt(np.add.reduceat((y ** 2).mean(axis=1), np.arange(0, len(y), hop))
                      / np.diff(np.append(np.arange(0, len(y), hop), len(y))))
@@ -394,17 +511,20 @@ def ride_level(y: np.ndarray, sr: int, ratio: float = 3.0, window: float = 1.0,
     k = max(1, int(window / 0.1))
     smooth = np.convolve(db, np.ones(k) / k, mode="same")
     typical = np.median(smooth[smooth > smooth.max() - 30])
-    gain = (typical - smooth) * (1 - 1 / ratio)
+    t = np.arange(len(smooth)) * hop + hop / 2
+    goal = typical + (np.interp(t / sr, *target) if target is not None else 0.0)
+    gain = (goal - smooth) * (1 - 1 / ratio)
     gain = np.clip(gain, -12, max_boost)
     gain[smooth < typical - 30] = 0.0  # leave real breaks and fades alone
     gain = np.convolve(gain, np.ones(k) / k, mode="same")  # ease every change in
-    t = np.arange(len(gain)) * hop + hop / 2
     return y * 10 ** (np.interp(np.arange(len(y)), t, gain) / 20)[:, None]
 
 
-def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False) -> None:
+def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False,
+             contour=None) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
-    noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95)."""
+    noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95).
+    `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level)."""
     import numpy as np
     import soundfile as sf
     from scipy.signal import butter, fftconvolve, lfilter
@@ -423,9 +543,11 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
         room_y = np.stack([fftconvolve(y[:, c], ir[:, c])[:len(y)] for c in range(2)], axis=1)
         room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
         out = (1 - wet) * y + wet * room_y
-    out = ride_level(out, sr)
-    if master:  # less low-mid boxiness, a touch of air, and 2 dB louder with peaks rounded off
-        for kind, f0, g, q in (("peak", 300, -2.5, 0.9), ("shelf", 9000, 2.0, 0.7)):
+    out = ride_level(out, sr) if contour is None else ride_level(out, sr, target=contour)
+    if master:  # less low-mid boxiness, less edge, a touch of air, and 2 dB louder with peaks rounded off
+        # (the quartet has ~3x a pop mix's share of 2-6 kHz, where the ear is most sensitive, so it
+        # sounded louder and harsher than its level; -3 dB at 3.5 kHz was preferred in an A/B)
+        for kind, f0, g, q in (("peak", 300, -2.5, 0.9), ("peak", 3500, -3.0, 0.8), ("shelf", 9000, 2.0, 0.7)):
             out = lfilter(*_biquad(kind, f0, g, q, sr), out, axis=0)
         out *= 10 ** ((level_db + 2) / 20) / max(np.sqrt((out ** 2).mean()), 1e-9)
         out = np.where(np.abs(out) > 0.8, np.sign(out) * (0.8 + 0.19 * np.tanh((np.abs(out) - 0.8) / 0.19)), out)
@@ -436,7 +558,7 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
     sf.write(str(wav), out * gain, sr)
 
 
-RELEASE_LUFS = -14.0  # Spotify's playback level
+RELEASE_LUFS = -18.0  # Spotify's -14 and Apple's -16 both sounded too loud next to everything else
 RELEASE_CEILING_DB = -1.3  # limiter ceiling; margin under Spotify's -1 dBTP after resampling
 
 
@@ -450,12 +572,12 @@ def loudness(wav: Path) -> tuple[float, float]:
             float(re.search(r"Peak:\s+(-?[\d.]+) dBFS", summary)[1]))
 
 
-def master_for_release(src: Path, dst: Path) -> tuple[float, float]:
-    """Ready a finished preview for streaming: nudge it to -14 LUFS, round off the peaks with a
+def master_for_release(src: Path, dst: Path, lufs: float = RELEASE_LUFS) -> tuple[float, float]:
+    """Ready a finished preview for streaming: bring it to `lufs` (integrated loudness), round off the peaks with a
     gentle limiter run at 4x the sample rate (so it catches the peaks between samples, which a
     lossy encode would clip), trim dead air at both ends, and write 24-bit / 44.1 kHz WAV, which
     every distributor accepts. Returns the result's (LUFS, dBTP)."""
-    gain = RELEASE_LUFS - loudness(src)[0]
+    gain = lufs - loudness(src)[0]
     chain = ",".join([
         "silenceremove=start_periods=1:start_threshold=-70dB",  # dead air before the first note
         "areverse,silenceremove=start_periods=1:start_threshold=-70dB,areverse",  # ...and after the tail

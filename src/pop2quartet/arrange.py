@@ -510,16 +510,26 @@ def lift_last_chorus(parts: dict[str, list[Note]], plan) -> tuple[dict[str, list
     return {**parts, "vln2": sorted(keep + double, key=lambda n: n.start)}, start
 
 
+def first_chorus(plan) -> float:
+    """Beat where the song first reaches its loudest dynamic level (0 if it starts there or there
+    is no plan): the end of the first verse."""
+    if not plan:
+        return 0.0
+    top = max(lv for _, lv in plan)
+    return next(start for start, lv in plan if lv == top)
+
+
 def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scale: set[int],
-                  min_gap: float = 2.0, min_notes: int = 3) -> tuple[list[Note], int]:
+                  min_gap: float = 2.0, min_notes: int = 3, after: float = 0.0) -> tuple[list[Note], int]:
     """Where the singer rests at least `min_gap` beats, violin II answers with the band's own hook
     from that moment (in key, notes of half a beat or more, moved into violin II's upper range)
-    instead of holding chords. Returns violin II's new line and how many answers it plays."""
+    instead of holding chords; only from beat `after` on. Returns violin II's new line and how
+    many answers it plays."""
     lo, hi, _ = RANGES["vln2"]
     out, answers = list(inner), 0
     for a, b in zip(melody, melody[1:]):
         s, e = a.end, b.start
-        if e - s < min_gap:
+        if e - s < min_gap or s < after:
             continue
         phrase = [n for n in hooks if s <= n.start and n.end <= e
                   and n.pitch % 12 in scale and n.end - n.start >= 0.5]
@@ -623,9 +633,11 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
-            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0):
+            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
-    transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes."""
+    transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes.
+    Before beat `sparse_until` (the first verse) the inner voices hold their chords instead of
+    playing the groove and don't answer the tune, so the song has somewhere to build to."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
     vocals, bass = drop_harmonics(vocals), drop_harmonics(bass)
 
@@ -688,10 +700,13 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
         print("[arrange] groove: " + "".join("x" if i / 2 in pattern else "." for i in range(8))
               + " (eighths in a bar)")
         skip = solo if inner_style == "auto" else None
+        if sparse_until:
+            n_slots = math.ceil(total / harmony_slot)
+            skip = [bool(skip and skip[k]) or k * harmony_slot < sparse_until for k in range(n_slots)]
         vln2, vla = groove(vln2, pattern, skip, harmony_slot), groove(vla, pattern, skip, harmony_slot)
 
     if counter:
-        vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale)
+        vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale, after=sparse_until)
         print(f"[arrange] violin II answers the tune with the band's hook {answers} times")
     if repeat_gap:
         melody, a = cap_repeats(melody, repeat_gap)

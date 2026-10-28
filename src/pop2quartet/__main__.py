@@ -8,8 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
-from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, lift_last_chorus
-from .export import ROOMS, add_room, master_for_release, render_audio, room_for, write_midi, write_musicxml
+from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
+from .export import (RELEASE_LUFS, ROOMS, add_room, master_for_release, preview_seconds, render_audio,
+                     room_for, write_midi, write_musicxml)
 from .quality import WEIGHTS, evaluate
 from .separate import separate
 from .transcribe import (Note, beat_loudness, chroma_repair, drum_activity, drum_pattern,
@@ -55,12 +56,35 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             sung=sung_line(stems["vocals"], to_sec) if args.melody == "best" else None,
                             leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter,
                             repeat_gap=args.max_repeat * float(np.median(np.diff(beat_times))) ** -1
-                            if args.max_repeat else 0.0)
+                            if args.max_repeat else 0.0,
+                            sparse_until=first_chorus(plan) if args.vary else 0.0)
     if args.lift:
         parts, start = lift_last_chorus(parts, plan)
         if verbose and start >= 0:
             print(f"[arrange] last chorus lift from bar {int(start // 4) + 1}: violin II doubles the tune")
-    return {"parts": parts, "chords": chords, "plan": plan, "tempo": tempo, "to_sec": to_sec}
+    return {"parts": parts, "chords": chords, "plan": plan, "tempo": tempo, "to_sec": to_sec,
+            "loud": loud}
+
+
+MAX_BPM = 160  # a pop song's beat is rarely faster; a grid above this is double time, and its
+# 16ths come out as frantic flurries of tiny notes and machine-gun repeats
+
+
+def bpm_of(beat_times: np.ndarray) -> float:
+    return 60.0 / float(np.median(np.diff(beat_times)))
+
+
+SONG_RIDE = 0.13  # --ride song: the quartet's loudness moves this share as far as the recording's
+# (0.6, 0.35 and 0.23 faded too much; 0.13 was picked in an A/B)
+
+
+def song_contour(loud: np.ndarray, tempo: float, marks: list,
+                 amount: float = SONG_RIDE) -> tuple[np.ndarray, np.ndarray]:
+    """(preview seconds, dB) the leveler steers toward: the recording's loudness per beat, relative
+    to its typical level, smoothed over four bars, `amount` of its range."""
+    rel = loud - np.median(loud[loud > loud.max() - 30])
+    rel = np.convolve(np.pad(np.clip(rel, -10, 8), 8, mode="edge"), np.ones(17) / 17, mode="valid")
+    return preview_seconds(np.arange(len(loud)) + 0.5, tempo, marks), amount * rel
 
 
 def main() -> None:
@@ -139,7 +163,25 @@ def main() -> None:
     ap.add_argument("--master", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: EQ (less low-mid mud, more air) and a louder, limited level")
     ap.add_argument("--release", action=argparse.BooleanOptionalAction, default=True,
-                    help="preview only: ready for streaming at -14 LUFS, peaks under -1 dBTP, 24-bit")
+                    help="preview only: ready for streaming at --lufs, peaks under -1 dBTP, 24-bit")
+    ap.add_argument("--lufs", type=float, default=RELEASE_LUFS,
+                    help="release loudness (Spotify plays at -14, Apple Music at -16; quieter is "
+                         "played quieter, louder is turned down)")
+    ap.add_argument("--vary", action=argparse.BooleanOptionalAction, default=True,
+                    help="first verse sparse (held chords, no answers), so later verses and choruses build")
+    ap.add_argument("--slides", action=argparse.BooleanOptionalAction, default=True,
+                    help="preview only: violin I slides up into a held note after a leap, like a singer")
+    ap.add_argument("--humanize", type=float, default=10.0,
+                    help="preview only: the four players drift apart by up to this many ms (MuseScore; "
+                         "renders each part separately, so ~4x slower; 0 = off)")
+    ap.add_argument("--ride", choices=["flat", "song"], default="song",
+                    help="preview only: the leveler evens the quartet out to one level (flat) or steers "
+                         "it along the recording's loudness, so choruses keep their lift (song)")
+    ap.add_argument("--speed", type=float, default=1.0,
+                    help="play the quartet at this share of the recording's tempo (0.85 = 15%% slower)")
+    ap.add_argument("--ride-amount", type=float, default=SONG_RIDE,
+                    help="--ride song: how far the quartet follows the recording's loudness changes "
+                         "(0.13 = 13%% as far; 0 = as flat as possible)")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
 
@@ -157,10 +199,17 @@ def main() -> None:
 
     vocals = stems["vocals"] if raw["vocals"] else None
     grids = {"detected": beat_times}
-    if args.auto and not args.bpm:  # beat trackers often lock onto half or double the tempo
+    if not args.bpm and (args.auto or bpm_of(beat_times) > MAX_BPM):
+        # beat trackers often lock onto half or double the tempo
         grids["half"] = beat_times[::2]
         grids["half, offbeat"] = beat_times[1::2]
-        grids["double"] = np.sort(np.concatenate([beat_times, (beat_times[1:] + beat_times[:-1]) / 2]))
+        if args.auto:
+            grids["double"] = np.sort(np.concatenate([beat_times, (beat_times[1:] + beat_times[:-1]) / 2]))
+        playable = {k: v for k, v in grids.items() if bpm_of(v) <= MAX_BPM}
+        if len(playable) < len(grids):
+            print(f"[auto] skipping tempos over {MAX_BPM} BPM: "
+                  + ", ".join(f"{k} ({bpm_of(v):.0f})" for k, v in grids.items() if k not in playable))
+        grids = playable or {k: v for k, v in grids.items() if k.startswith("half")}
     grid_opts = [args.grid] if args.grid else [0.25, 0.5] if args.auto else [0.25]
     slot_opts = [args.harmony_slot] if args.harmony_slot else [1.0, 2.0] if args.auto else [1.0]
     options = list(itertools.product(grids, grid_opts, slot_opts))
@@ -183,11 +232,15 @@ def main() -> None:
         name, grid, slot = options[0]
     cand = build(args, raw, stems, grids[name], grid, slot, verbose=True)
     parts, chords, plan, tempo = cand["parts"], cand["chords"], cand["plan"], cand["tempo"]
+    loud = cand["loud"]
     for k, ns in parts.items():
         print(f"[arrange] {k}: {len(ns)} notes")
     q = evaluate(parts, chords, cand["to_sec"], args.audio, tempo, vocals)
     print("[quality] " + ", ".join(f"{k} {v:.2f}" for k, v in q.items())
           + "  (fidelity: 1 = matches the recording; the rest: 0 = clean)")
+    if args.speed != 1.0:
+        tempo *= args.speed
+        print(f"[export] played at {args.speed:.0%} of the recording's tempo: {tempo:.0f} BPM")
 
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
@@ -198,16 +251,18 @@ def main() -> None:
     if not args.no_render:
         # MuseScore plays chord symbols on a piano, so the preview gets a copy without them
         bare = out / ".preview.musicxml"
+        marks = []
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
-                       args.accents, args.rubato)
-        how = render_audio(bare, midi, out / "preview.wav")
+                       args.accents, args.rubato, args.slides, marks)
+        how = render_audio(bare, midi, out / "preview.wav", args.humanize)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
-            add_room(out / "preview.wav", room, master=args.master)
+            contour = song_contour(loud, tempo, marks, args.ride_amount) if args.ride == "song" else None
+            add_room(out / "preview.wav", room, master=args.master, contour=contour)
             level = ""
             if args.release:
-                lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav")
+                lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav", args.lufs)
                 level = f", {lufs:.1f} LUFS, {peak:.1f} dBTP"
             print(f"[export] {out / 'preview.wav'} (played by {how}, {room} room{level})")
 
