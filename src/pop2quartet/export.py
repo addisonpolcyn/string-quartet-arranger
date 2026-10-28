@@ -520,11 +520,26 @@ def ride_level(y: np.ndarray, sr: int, ratio: float = 3.0, window: float = 1.0,
     return y * 10 ** (np.interp(np.arange(len(y)), t, gain) / 20)[:, None]
 
 
+FADE = 2.5  # seconds the final chord dies away over, as players let it go
+FADE_TO = -24.0  # dB it has faded to when the bows stop; the room rings on from there
+
+
+def music_end(y: np.ndarray, sr: int) -> int:
+    """Sample where the music stops: the end of the last 0.1 s within 20 dB of its typical level."""
+    hop = int(0.1 * sr)
+    frames = np.sqrt(np.add.reduceat((y ** 2).mean(axis=1), np.arange(0, len(y), hop)) / hop)
+    db = 20 * np.log10(frames + 1e-9)
+    typical = np.median(db[db > db.max() - 30])
+    return min(len(y), (int(np.nonzero(db > typical - 20)[0][-1]) + 1) * hop)
+
+
 def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False,
              contour=None) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
     noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95).
-    `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level)."""
+    `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level).
+    The last chord fades over FADE seconds and the room rings out after it, instead of the
+    music stopping dead where the render ends."""
     import numpy as np
     import soundfile as sf
     from scipy.signal import butter, fftconvolve, lfilter
@@ -532,6 +547,9 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
     y, sr = sf.read(str(wav), always_2d=True)
     if y.shape[1] == 1:
         y = np.repeat(y, 2, axis=1)
+    end = music_end(y, sr)
+    ring = (ROOMS[room][0] if ROOMS.get(room) else 0.0) + 0.5
+    y = np.vstack([y, np.zeros((int(ring * sr), 2))])  # room for the reverb's tail
     out = y
     if ROOMS.get(room):
         decay, wet = ROOMS[room]
@@ -544,6 +562,12 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
         room_y *= np.sqrt((y ** 2).mean() / max((room_y ** 2).mean(), 1e-12))
         out = (1 - wet) * y + wet * room_y
     out = ride_level(out, sr) if contour is None else ride_level(out, sr, target=contour)
+    # after the leveler, which would otherwise ride the fade back up
+    start = max(0, end - int(FADE * sr))
+    fade = np.ones(len(out))
+    fade[start:end] = 10 ** (FADE_TO / 20 * (1 - np.cos(np.linspace(0, np.pi, end - start))) / 2)
+    fade[end:] = 10 ** (FADE_TO / 20)
+    out = out * fade[:, None]
     if master:  # less low-mid boxiness, less edge, a touch of air, and 2 dB louder with peaks rounded off
         # (the quartet has ~3x a pop mix's share of 2-6 kHz, where the ear is most sensitive, so it
         # sounded louder and harsher than its level; -3 dB at 3.5 kHz was preferred in an A/B)
