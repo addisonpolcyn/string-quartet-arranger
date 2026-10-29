@@ -180,7 +180,7 @@ def main() -> None:
                     help="first verse sparse (held chords, no answers), so later verses and choruses build")
     ap.add_argument("--slides", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: violin I slides up into a held note after a leap, like a singer")
-    ap.add_argument("--humanize", type=float, default=10.0,
+    ap.add_argument("--humanize", type=float, default=3.0,
                     help="preview only: the four players drift apart by up to this many ms (MuseScore; "
                          "renders each part separately, so ~4x slower; 0 = off)")
     ap.add_argument("--ride", choices=["flat", "song"], default="song",

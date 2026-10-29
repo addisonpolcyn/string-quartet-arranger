@@ -120,7 +120,7 @@ different arrangement options takes seconds.
 | `--sections` | loudness | dynamics by loudness, or `repeats`: at detected sections, the loudest returning one as the chorus (experimental: found Boston's choruses, missed Save Your Tears') |
 | `--reverb` | real | preview only: rooms recorded in real spaces (impulse responses in `<cache>/ir`, see below), or `noise` |
 | `--timing` | notes | preview only, with `--humanize`: the players stay together and slip on single notes (mostly entries), then find each other again; `drift` = slow continuous drift |
-| `--humanize` | 10 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
+| `--humanize` | 3 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
 | `--speed` | 1.0 | play the quartet at this share of the recording's tempo (0.85 = 15% slower) |
 | `--vary` / `--no-vary` | on | first verse sparse (held chords, no answers), so later verses and choruses build |
 | `--slides` / `--no-slides` | on | preview only: violin I slides up into a held note after a leap, like a singer |
