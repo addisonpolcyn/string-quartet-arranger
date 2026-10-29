@@ -70,10 +70,15 @@ def _crepe(y: np.ndarray, sr: int, hop: int) -> tuple[np.ndarray, np.ndarray]:
     import torch
     import torchcrepe
 
+    from .export import one_at_a_time
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    f0, periodicity = torchcrepe.predict(torch.tensor(y[None], dtype=torch.float32), sr, hop, 80, 1200,
-                                         "full", decoder=torchcrepe.decode.viterbi,
-                                         return_periodicity=True, batch_size=1024, device=device)
+    with one_at_a_time("gpu"):
+        f0, periodicity = torchcrepe.predict(torch.tensor(y[None], dtype=torch.float32), sr, hop, 80,
+                                             1200, "full", decoder=torchcrepe.decode.viterbi,
+                                             return_periodicity=True, batch_size=1024, device=device)
+        if device == "cuda":
+            torch.cuda.empty_cache()  # hand the memory back before the next song takes the GPU
     periodicity = torchcrepe.filter.median(periodicity, 3)
     return f0[0].cpu().numpy(), periodicity[0].cpu().numpy()
 

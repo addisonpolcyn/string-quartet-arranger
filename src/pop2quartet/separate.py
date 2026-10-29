@@ -12,9 +12,12 @@ def separate(audio: Path, workdir: Path, model: str = "htdemucs") -> dict[str, P
     if all(p.exists() for p in stems.values()):
         print(f"[separate] using cached stems in {out}")
         return stems
+    from .export import one_at_a_time
+
     print(f"[separate] running Demucs ({model}) ...")
-    subprocess.run(
-        [sys.executable, "-m", "demucs", "-n", model, "-o", str(workdir), str(audio)],
-        check=True,
-    )
+    with one_at_a_time("gpu"):
+        subprocess.run(
+            [sys.executable, "-m", "demucs", "-n", model, "-o", str(workdir), str(audio)],
+            check=True,
+        )
     return stems

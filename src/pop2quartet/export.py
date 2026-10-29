@@ -416,14 +416,15 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None) -> Non
 
 
 @contextlib.contextmanager
-def one_at_a_time():
-    """Several songs may convert at once, but MuseScore (a desktop app) renders one at a time."""
+def one_at_a_time(what: str = "musescore"):
+    """Several songs may convert at once, but MuseScore (a desktop app) renders one at a time,
+    and one song at a time uses the GPU (several CREPE models fill its memory and it crawls)."""
     try:
         import fcntl
     except ImportError:  # Windows: no flock, and nothing to coordinate with
         yield
         return
-    with open(Path(tempfile.gettempdir()) / "pop2quartet-musescore.lock", "w") as lock:
+    with open(Path(tempfile.gettempdir()) / f"pop2quartet-{what}.lock", "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         yield
 
