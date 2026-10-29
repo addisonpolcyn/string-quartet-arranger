@@ -114,6 +114,8 @@ different arrangement options takes seconds.
 | `--ride` | song | preview only: the leveler steers the quartet along the recording's own loudness (20% of its range), so choruses keep their lift; `flat` evens everything to one level |
 | `--ride-amount` | 0.2 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
 | `--lead-ahead` | 2 | preview only: if violin I sits less than this many dB over the other three (a busy accompaniment), turn them down for the song to get it there, at most 8 dB |
+| `--lower-high` / `--no-lower-high` | on | a tune spending 8% or more of its time at A5 or above plays the whole song an octave lower; violin II and its answers follow |
+| `--high-share` | 0.08 | `--lower-high`: share of the tune's time at A5+ that takes it down an octave; 0 lowers any tune that still fits on the violin |
 | `--intonation` / `--no-intonation` | on | preview only: tune notes the way a quartet does (major 3rds 10 cents low, minor 3rds 8 high, the tune's leading tone 10 sharp, ~4 cents of spread) instead of dead in tune |
 | `--pitch` | crepe | pitch tracker for the sung line: `crepe` (neural, steadier on voices) or `pyin` |
 | `--chords` | audio | name chords from the band's audio (chroma of the separated stems) or from its transcribed `notes` |

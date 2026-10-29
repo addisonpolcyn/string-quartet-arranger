@@ -59,9 +59,14 @@ def transcribe(path: Path, kind: str) -> list[Note]:
     return notes
 
 
-def _crepe(y: np.ndarray, sr: int, hop: int) -> np.ndarray:
-    """f0 per frame from CREPE (a neural pitch tracker for one voice, far steadier on singing
-    than pYIN), NaN where it isn't confident there is a pitch."""
+# CREPE's confidence that a frame is pitched; breathy singers (Clairo) sit around 0.3, under
+# the usual 0.5 cut
+CREPE_VOICED = 0.5
+
+
+def _crepe(y: np.ndarray, sr: int, hop: int) -> tuple[np.ndarray, np.ndarray]:
+    """(f0, confidence) per frame from CREPE (a neural pitch tracker for one voice, far steadier
+    on singing than pYIN)."""
     import torch
     import torchcrepe
 
@@ -70,28 +75,32 @@ def _crepe(y: np.ndarray, sr: int, hop: int) -> np.ndarray:
                                          "full", decoder=torchcrepe.decode.viterbi,
                                          return_periodicity=True, batch_size=1024, device=device)
     periodicity = torchcrepe.filter.median(periodicity, 3)
-    f0, periodicity = f0[0].cpu().numpy(), periodicity[0].cpu().numpy()
-    return np.where(periodicity > 0.5, f0, np.nan)
+    return f0[0].cpu().numpy(), periodicity[0].cpu().numpy()
 
 
 def _pitch_track(path: Path, tracker: str = "pyin") -> tuple[np.ndarray, np.ndarray, float]:
     """(frame times, MIDI pitch per frame with the recording's tuning offset removed, offset).
     pYIN or CREPE f0 (NaN = unvoiced), cached next to the stem."""
-    cache = path.with_suffix(".f0.npz" if tracker == "pyin" else f".{tracker}.npz")
+    cache = path.with_suffix(".f0.npz" if tracker == "pyin" else f".{tracker}2.npz")
     if cache.exists():
         d = np.load(cache)
         times, f0 = d["times"], d["f0"]
+        if "periodicity" in d:
+            f0 = np.where(d["periodicity"] > CREPE_VOICED, f0, np.nan)
     else:
         import librosa
 
         print(f"[transcribe] {path.stem}: tracking pitch with {tracker} ...")
         y, sr = librosa.load(str(path), sr=16000, mono=True)
         if tracker == "crepe":
-            f0 = _crepe(y, sr, 320)
+            f0, periodicity = _crepe(y, sr, 320)
+            times = librosa.times_like(f0, sr=sr, hop_length=320)
+            np.savez(cache, times=times, f0=f0, periodicity=periodicity)
+            f0 = np.where(periodicity > CREPE_VOICED, f0, np.nan)
         else:
             f0, _, _ = librosa.pyin(y, fmin=80, fmax=1200, sr=sr, hop_length=320)  # NaN = unvoiced
-        times = librosa.times_like(f0, sr=sr, hop_length=320)
-        np.savez(cache, times=times, f0=f0)
+            times = librosa.times_like(f0, sr=sr, hop_length=320)
+            np.savez(cache, times=times, f0=f0)
     with np.errstate(invalid="ignore"):
         midi = 69 + 12 * np.log2(f0 / 440.0)
     # recordings are often tuned a little off A440; a singer 20 cents flat plus vibrato keeps

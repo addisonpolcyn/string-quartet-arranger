@@ -63,6 +63,7 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             repeat_gap=args.max_repeat * float(np.median(np.diff(beat_times))) ** -1
                             if args.max_repeat else 0.0,
                             sparse_until=first_chorus(plan) if args.vary else 0.0,
+                            lower_high=args.lower_high, high_share=args.high_share,
                             harmony=band_chroma(stems["other"], stems["bass"], to_sec)
                             if args.chords == "audio" else None)
     if args.lift:
@@ -200,6 +201,12 @@ def main() -> None:
     ap.add_argument("--lead-ahead", type=float, default=2.0,
                     help="preview only: if violin I sits less than this many dB over the other three "
                          "(a busy accompaniment), turn them down for the song to get it there (0 = off)")
+    ap.add_argument("--lower-high", action=argparse.BooleanOptionalAction, default=True,
+                    help="a tune spending 8%%+ of its time at A5 or above plays the whole song an "
+                         "octave lower (violin II and its answers follow)")
+    ap.add_argument("--high-share", type=float, default=0.08,
+                    help="--lower-high: share of the tune's time at A5+ that takes it down an octave "
+                         "(0 = lower any tune that still fits on the violin)")
     ap.add_argument("--intonation", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: tune notes the way a quartet does (thirds toward pure, the "
                          "leading tone sharp, a few cents of spread) instead of dead in tune")

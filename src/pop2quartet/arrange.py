@@ -538,9 +538,10 @@ def first_chorus(plan) -> float:
 
 
 def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scale: set[int],
-                  min_gap: float = 2.0, min_notes: int = 3, after: float = 0.0) -> tuple[list[Note], int]:
+                  min_gap: float = 2.0, min_notes: int = 3, after: float = 0.0,
+                  centre: int = 73) -> tuple[list[Note], int]:
     """Where the singer rests at least `min_gap` beats, violin II answers with the band's own hook
-    from that moment (in key, notes of half a beat or more, moved into violin II's upper range)
+    from that moment (in key, notes of half a beat or more, centred on `centre`, near the tune)
     instead of holding chords; only from beat `after` on. Returns violin II's new line and how
     many answers it plays."""
     lo, hi, _ = RANGES["vln2"]
@@ -554,7 +555,7 @@ def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scal
         if len(phrase) < min_notes:
             continue
         mid = float(np.median([n.pitch for n in phrase]))
-        shift = 12 * round((73 - mid) / 12)  # centre the answer around C#5, near the tune
+        shift = 12 * round((centre - mid) / 12)
         phrase = [Note(n.start, n.end, n.pitch + shift, COUNTER_VELOCITY) for n in phrase]
         if min(n.pitch for n in phrase) < lo or max(n.pitch for n in phrase) > hi:
             continue
@@ -563,6 +564,28 @@ def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scal
         out = [n for n in out if n.end > n.start] + phrase
         answers += 1
     return sorted(out, key=lambda n: n.start), answers
+
+
+HIGH = 81          # A5: a violin spending its time up here turns thin and strained
+HIGH_SHARE = 0.08  # share of the tune's time at A5+ that takes the whole song down an octave
+LOW_SHARE = 0.05   # ... as long as no more than this would drop under the violin's G string
+
+
+def lower_if_high(notes: list[Note], part: str = "vln1",
+                  share: float = HIGH_SHARE) -> tuple[list[Note], bool]:
+    """The whole tune down an octave when it spends a lot of its time high and still fits there
+    (the few notes under the G string stay up). One octave for the song, never phrase by
+    phrase, so the tune never jumps register. `share` 0 lowers any tune that fits."""
+    lo = RANGES[part][0]
+    if not notes:
+        return notes, False
+    dur = np.array([n.end - n.start for n in notes])
+    pitch = np.array([n.pitch for n in notes])
+    high = dur[pitch >= HIGH].sum() / dur.sum()
+    if high < share or np.mean(pitch - 12 < lo) > LOW_SHARE:
+        return notes, False
+    return [Note(n.start, n.end, n.pitch - 12 if n.pitch - 12 >= lo else n.pitch, n.velocity)
+            for n in notes], True
 
 
 def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
@@ -651,13 +674,15 @@ def pulse(notes: list[Note], step: float) -> list[Note]:
 def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="auto",
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
-            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0, harmony=None):
+            leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0, harmony=None,
+            lower_high=False, high_share=HIGH_SHARE):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
     transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes.
     Before beat `sparse_until` (the first verse) the inner voices hold their chords instead of
     playing the groove and don't answer the tune, so the song has somewhere to build to.
     With `harmony` (transcribe.band_chroma), chords are named from the band's audio rather than
-    from its transcribed notes."""
+    from its transcribed notes. `lower_high` takes a tune that sits high down an octave for the
+    whole song (lower_if_high); violin II, voiced under the tune, and its answers follow."""
     vocals, bass, other = (quantize(x, grid) for x in (vocals, bass, other))
     vocals, bass = drop_harmonics(vocals), drop_harmonics(bass)
 
@@ -702,6 +727,11 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     if repair:  # last word on the tune goes to the recording itself
         melody, matched = repair(melody, scale)
         print(f"[melody] moved {matched} notes onto the pitch the voice actually sings")
+    lowered = False
+    if lower_high:
+        melody, lowered = lower_if_high(melody, share=high_share)
+        if lowered:
+            print("[arrange] the tune sits high: whole song taken down an octave")
     if bass_hold:  # let the bass ring like a sustain pedal, released when the chord changes
         cello = merge_repeats(hold(cello, bass_hold, chords, harmony_slot))
     band = chord_per_slot(other, bass, total, harmony_slot)  # the band's 7ths, 9ths, ... too
@@ -727,7 +757,8 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
         vln2, vla = groove(vln2, pattern, skip, harmony_slot), groove(vla, pattern, skip, harmony_slot)
 
     if counter:
-        vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale, after=sparse_until)
+        vln2, answers = countermelody(melody, fit_range(hooks, "vln2"), vln2, scale, after=sparse_until,
+                                       centre=61 if lowered else 73)
         print(f"[arrange] violin II answers the tune with the band's hook {answers} times")
     if repeat_gap:
         melody, a = cap_repeats(melody, repeat_gap)
