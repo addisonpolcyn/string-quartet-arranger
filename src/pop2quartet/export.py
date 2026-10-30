@@ -380,8 +380,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 # other ensembles (experiment): per part, (music21 instrument, display name, Muse Sounds uid,
 # fader dB) and the playable range the part's notes are folded into (sounding MIDI pitches)
 ENSEMBLES = {
-    "piano_trio": {"vln2": ("Piano", "Piano", "167", -4.0, (36, 96)),
-                   "vla": ("Piano", "Piano", "167", -4.0, (36, 96))},
+    "piano_trio": {"vln2": ("Piano", "Piano", "167", 4.0, (36, 96)),
+                   "vla": ("Piano", "Piano", "167", 4.0, (36, 96))},
     "woodwinds": {"vln1": ("Flute", "Flute", "118", 4.0, (60, 96)),
                   "vln2": ("Oboe", "Oboe", "124", -1.0, (58, 93)),
                   "vla": ("Clarinet", "Clarinet in B\u266d", "127", 0.0, (50, 94)),
@@ -393,6 +393,10 @@ ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
 def set_ensemble(name: str) -> None:
     ENSEMBLE.clear()
     ENSEMBLE.update(ENSEMBLES.get(name, {}))
+    for k, v in ENSEMBLE.items():  # a piano is the harmony bed, not a backing voice: full level
+        if v[0] == "Piano":
+            SOFTER.pop(k, None)
+            DYNAMICS[k] = "mf"
 
 
 def fold_into(notes: list, lo: int, hi: int) -> list:

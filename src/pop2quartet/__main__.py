@@ -304,6 +304,7 @@ def main() -> None:
         args.harmonic_ending = args.harmonic_ending and args.ensemble == "piano_trio"
     if args.ensemble == "piano_trio":
         args.intonation = False  # a piano can't bend; a violin tuned off it would clash
+        args.lead_boost = args.cello_boost = 0.0  # three equals, not a quartet's soloist over a bed
     if args.ensemble == "woodwinds":
         args.lower_high = False  # a flute is weak and breathy down low
 
