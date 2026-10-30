@@ -312,7 +312,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 for a, peak, b in phrase_arcs(notes, busy):
                     part.insert(0, dynamics.Crescendo(placed[a][1], placed[peak][1]))
                     part.insert(0, dynamics.Diminuendo(placed[peak][1], placed[b][1]))
-        if k == "vln2":  # the answers to the tune sit a level under violin II's chords
+        if k in ("vln2", "vln1"):  # violin II's answers to the tune, and violin I over a
+            # singing cello, sit a level under
             soft = [abs(n.velocity - COUNTER_VELOCITY) < 1e-6 for n in parts[k]]
             for i, n in enumerate(parts[k]):
                 if not soft[i] or (i and soft[i - 1]):

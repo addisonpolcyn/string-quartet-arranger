@@ -574,11 +574,26 @@ def _verse_after_chorus(plan) -> tuple[float, float] | None:
     return plan[k][0], end
 
 
-def cello_sings(parts: dict[str, list[Note]], span: tuple[float, float]) -> dict[str, list[Note]]:
-    """The cello takes the tune for `span` (its singing register, around A3), violin I rests and
-    comes back with the tune after; violin II and viola keep their chords. The bass line drops out
-    for those bars, the cello now being the voice."""
-    s, e = span
+def at_breaths(tune: list[Note], span: tuple[float, float], breath: float = 0.5,
+               reach: float = 8.0) -> tuple[float, float]:
+    """`span` with both edges moved to the nearest breath in the tune (a phrase starting after a
+    rest of `breath` beats), within `reach` beats, so a handoff never cuts into a sung line."""
+    starts = [n.start for k, n in enumerate(tune) if k == 0 or n.start - tune[k - 1].end >= breath]
+
+    def snap(t: float) -> float:
+        near = [x for x in starts if abs(x - t) <= reach]
+        return min(near, key=lambda x: abs(x - t)) if near else t
+    s, e = snap(span[0]), snap(span[1])
+    return (s, e) if e - s >= 8 else span
+
+
+def cello_sings(parts: dict[str, list[Note]], span: tuple[float, float],
+                violin: str = "double") -> dict[str, list[Note]]:
+    """The cello takes the tune for `span` (its singing register, around A3); violin II and viola
+    keep their chords, and the bass line drops out for those bars, the cello now being the voice.
+    Violin I, a level softer: "double" plays the tune an octave over the cello, "descant" holds
+    violin II's chord notes an octave up, "rest" stops until the chorus."""
+    s, e = at_breaths(parts["vln1"], span)
     inside = lambda n: s <= n.start < e
     tune = [n for n in parts["vln1"] if inside(n)]
     if not tune:
@@ -594,7 +609,15 @@ def cello_sings(parts: dict[str, list[Note]], span: tuple[float, float]) -> dict
             p += 12
         sung.append(Note(n.start, min(n.end, e), p, n.velocity))
     out = dict(parts)
-    out["vln1"] = [n for n in parts["vln1"] if not inside(n)]
+    keep = [n for n in parts["vln1"] if not inside(n)]
+    if violin == "double":
+        over = [Note(n.start, n.end, n.pitch + 12, COUNTER_VELOCITY) for n in sung]
+    elif violin == "descant":
+        over = [Note(n.start, n.end, n.pitch + 12, COUNTER_VELOCITY)
+                for n in merge_repeats([m for m in parts["vln2"] if inside(m)])]
+    else:
+        over = []
+    out["vln1"] = sorted(keep + [n for n in over if n.pitch <= RANGES["vln1"][1]], key=lambda n: n.start)
     out["vc"] = sorted([n for n in parts["vc"] if not inside(n)] + sung, key=lambda n: n.start)
     return out
 

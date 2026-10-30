@@ -72,7 +72,7 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
     if args.cello_verse:
         span = second_verse(plan, loudness_tiers(loud))
         if span:
-            parts = cello_sings(parts, span)
+            parts = cello_sings(parts, span, args.cello_verse_violin)
             if verbose:
                 print(f"[arrange] the cello sings the second verse: bars {int(span[0] // 4) + 1}-{int(span[1] // 4)}")
     if args.suspensions:
@@ -230,7 +230,7 @@ def main() -> None:
     ap.add_argument("--ride", choices=["flat", "song"], default="song",
                     help="preview only: the leveler evens the quartet out to one level (flat) or steers "
                          "it along the recording's loudness, so choruses keep their lift (song)")
-    ap.add_argument("--speed", type=float, default=1.0,
+    ap.add_argument("--speed", type=float, default=0.95,
                     help="play the quartet at this share of the recording's tempo (0.85 = 15%% slower)")
     ap.add_argument("--ride-amount", type=float, default=SONG_RIDE,
                     help="--ride song: how far the quartet follows the recording's loudness changes "
@@ -246,9 +246,12 @@ def main() -> None:
                          "its own, so ~2x slower)")
     ap.add_argument("--warm-master", action=argparse.BooleanOptionalAction, default=False,
                     help="preview only, with --master: keep more body (300 Hz), no added air, light tape saturation")
-    ap.add_argument("--cello-verse", action=argparse.BooleanOptionalAction, default=False,
+    ap.add_argument("--cello-verse", action=argparse.BooleanOptionalAction, default=True,
                     help="the cello sings the tune in the second verse; violin I rests and returns for the chorus")
-    ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=False,
+    ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
+                    help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
+                         "descant, or rests")
+    ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=True,
                     help="violin II / viola hold a note into the next chord and resolve down (once per 2 bars each)")
     ap.add_argument("--lead-boost", type=float, default=3.0,
                     help="preview only: dB added to violin I's fader (on top of its +6.5)")
