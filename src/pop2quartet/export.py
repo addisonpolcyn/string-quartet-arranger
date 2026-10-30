@@ -221,6 +221,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
                    "vla": instrument.Viola, "vc": instrument.Violoncello, "db": instrument.Contrabass}
+    instruments.update({k: getattr(instrument, v[0]) for k, v in ENSEMBLE.items()})
     clefs = {"treble": clef.TrebleClef, "alto": clef.AltoClef, "bass": clef.BassClef}
 
     total = max((n.end for ns in parts.values() for n in ns), default=4.0)
@@ -245,7 +246,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     for k, name, _, clef_name in PARTS + ([BASS_PART] if parts.get("db") else []):
         part = stream.Part()
         inst = instruments[k]()
-        inst.partName = name
+        inst.partName = ENSEMBLE[k][1] if k in ENSEMBLE else name
         part.insert(0, inst)
         part.insert(0, clefs[clef_name]())
         part.insert(0, m21key.Key(detected.tonic.name, detected.mode))
@@ -319,7 +320,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                     busy.append((max(s0, s1 - 8), s1))
         if expression:
             notes = parts[k]
-            plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") else set()
+            plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") and k not in ENSEMBLE else set()
             for i in sorted(plucked):  # mark where plucking starts and where the bow returns
                 if i - 1 not in plucked:
                     part.insert(notes[i].start, expressions.TextExpression("pizz."))
@@ -376,6 +377,37 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 # Then where each sits (-1 = far left: the usual quartet half circle, the cello nearer the middle
 # as the bass carries the most energy) and its fader in dB: Muse Strings' cello sounds ~7 dB
 # louder than its violin at the same dynamic, so the cello comes down and the tune up, ~1.5 dB on top.
+# other ensembles (experiment): per part, (music21 instrument, display name, Muse Sounds uid,
+# fader dB) and the playable range the part's notes are folded into (sounding MIDI pitches)
+ENSEMBLES = {
+    "piano_trio": {"vln2": ("Piano", "Piano", "167", -4.0, (36, 96)),
+                   "vla": ("Piano", "Piano", "167", -4.0, (36, 96))},
+    "woodwinds": {"vln1": ("Flute", "Flute", "118", 4.0, (60, 96)),
+                  "vln2": ("Oboe", "Oboe", "124", -1.0, (58, 93)),
+                  "vla": ("Clarinet", "Clarinet in B\u266d", "127", 0.0, (50, 94)),
+                  "vc": ("Bassoon", "Bassoon", "133", 0.0, (34, 76))},
+}
+ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
+
+
+def set_ensemble(name: str) -> None:
+    ENSEMBLE.clear()
+    ENSEMBLE.update(ENSEMBLES.get(name, {}))
+
+
+def fold_into(notes: list, lo: int, hi: int) -> list:
+    """Notes moved by octaves into an instrument's playable range."""
+    out = []
+    for n in notes:
+        p = n.pitch
+        while p < lo:
+            p += 12
+        while p > hi:
+            p -= 12
+        out.append(Note(n.start, n.end, p, n.velocity))
+    return out
+
+
 # the Muse Strings contrabass section (no solo bass found): a soft floor under the quartet
 MUSE_BASS = ("contrabass", "95", "Contrabasses", "strings.contrabass.orchestral", 0.4, -6.0)
 MUSE_SOLOISTS = [
@@ -487,6 +519,18 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
         "soloMuteState": {"mute": False, "solo": False},
     } for i, (instrument, uid, name, setup, pan, fader) in enumerate(
         MUSE_SOLOISTS + ([MUSE_BASS] if len(re.findall(r"<Part[ >]", mscx_text)) > len(MUSE_SOLOISTS) else []))]
+    if ENSEMBLE:  # other instruments: their Muse Sounds uid, and MuseScore's own instrument id
+        ids = re.findall(r"<instrumentId>([^<]*)</instrumentId>", mscx_text)
+        for i, (k, *_rest) in enumerate(PARTS):
+            if k in ENSEMBLE and i < len(settings["tracks"]):
+                _, name, uid, fader, _ = ENSEMBLE[k]
+                t = settings["tracks"][i]
+                meta = t["in"]["resourceMeta"]
+                meta["id"] = uid
+                meta["attributes"].update({"museUID": uid, "museName": name, "playbackSetupData": "",
+                                           "museCategory": "", "musePack": ""})
+                t["instrumentId"] = ids[i].split(".")[-1] if i < len(ids) else t["instrumentId"]
+                t["out"]["volumeDb"] = fader + (boost[i] if i < len(boost) else 0.0)
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
     with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():

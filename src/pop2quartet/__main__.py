@@ -251,6 +251,9 @@ def main() -> None:
     ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
+    ap.add_argument("--ensemble", choices=["quartet", "piano_trio", "woodwinds"], default="quartet",
+                    help="experiment: piano_trio (violin, piano, cello) or woodwinds (flute, oboe, "
+                         "clarinet, bassoon) instead of the string quartet")
     ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
                     help="a contrabass section doubles the cello an octave down in the song's loudest third")
     ap.add_argument("--bass-boost", type=float, default=4.0,
@@ -294,6 +297,15 @@ def main() -> None:
                          "and slip on single notes (mostly entries), then find each other again")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
+    from .export import set_ensemble
+    set_ensemble(args.ensemble)
+    if args.ensemble != "quartet":  # string techniques and the string bass don't apply
+        args.tremolo_builds = args.mutes = args.double_bass = False
+        args.harmonic_ending = args.harmonic_ending and args.ensemble == "piano_trio"
+    if args.ensemble == "piano_trio":
+        args.intonation = False  # a piano can't bend; a violin tuned off it would clash
+    if args.ensemble == "woodwinds":
+        args.lower_high = False  # a flute is weak and breathy down low
 
     out = args.out or Path("out") / args.audio.stem
     out.mkdir(parents=True, exist_ok=True)
@@ -362,6 +374,11 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    if args.ensemble != "quartet":
+        from .export import ENSEMBLE, fold_into
+        for k, (*_, (lo, hi)) in ENSEMBLE.items():
+            parts[k] = fold_into(parts[k], lo, hi)
+        print(f"[arrange] ensemble: {args.ensemble} (" + ", ".join(f"{k} = {v[1]}" for k, v in ENSEMBLE.items()) + ")")
     if args.double_bass:  # the contrabass section an octave under the cello in the loudest third
         loud_spans = tier_spans(loudness_tiers(cand["loud"]), 2)
         parts["db"] = [Note(n.start, n.end, n.pitch - 12 if n.pitch - 12 >= 28 else n.pitch, n.velocity)
