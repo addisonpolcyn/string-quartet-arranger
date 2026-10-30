@@ -318,6 +318,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                     wedge = dynamics.Crescendo if b > a else dynamics.Diminuendo
                     part.insert(0, wedge(span[0], span[-1]))
                     busy.append((max(s0, s1 - 8), s1))
+        if k == "vln1" and ENSEMBLE_NAME[0] in SWING:
+            part.insert(0, expressions.TextExpression("Swing"))
         if k in PIZZ.get(ENSEMBLE_NAME[0], ()):
             part.insert(0, expressions.TextExpression("pizz."))
         if expression:
@@ -399,9 +401,18 @@ ENSEMBLES = {
              "vln2": ("AcousticGuitar", "Guitar", None, 0.0, (52, 76)),
              "vla": ("Piano", "Piano", "167", 0.0, (21, 108)),
              "vc": ("Contrabass", "Contrabass", "95", 0.0, (28, 60))},
+    "motown": {"vln1": ("AltoSaxophone", "Alto Sax", "130", 2.0, (49, 81)),
+               "vln2": ("ElectricOrgan", "Organ", "171", -3.0, (36, 96)),
+               "vla": ("ElectricOrgan", "Organ", "171", -3.0, (36, 96)),
+               "vc": ("ElectricBass", "Bass", None, 2.0, (28, 60))},
+    "jazz": {"vln1": ("TenorSaxophone", "Tenor Sax", "131", 2.0, (44, 76)),
+             "vln2": ("Piano", "Piano", "167", -1.0, (21, 108)),
+             "vla": ("Piano", "Piano", "167", -1.0, (21, 108)),
+             "vc": ("Contrabass", "Bass", "95", 1.0, (28, 60))},
     "cuban_piano": {k: ("Piano", "Piano", "167", 2.0, (21, 108)) for k in ("vln1", "vln2", "vla", "vc")},
 }
-PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}, "bvsc": {"vc"}}  # parts plucked throughout
+PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}, "bvsc": {"vc"}, "jazz": {"vc"}}
+SWING = {"jazz"}  # ensembles whose 8ths MuseScore plays swung  # parts plucked throughout
 ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
 ENSEMBLE_NAME = ["quartet"]
 
@@ -526,6 +537,10 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
                 files[n].decode()).encode()
             if tunings:
                 files[n] = tune_notes(files[n].decode(), tunings).encode()
+            files[n] = re.sub(  # a "Swing" marking plays the 8ths swung (2:1, triplet feel)
+                r"<StaffText>(\s*<eid>[^<]*</eid>)?\s*<text>Swing</text>",
+                lambda m: f'<StaffText>{m[1] or ""}<swing unit="eighth" ratio="66"/><text>Swing</text>',
+                files[n].decode()).encode()
     mscx_text = next((files[n].decode() for n in files if n.endswith(".mscx")), "")
     settings = json.loads(files.get("audiosettings.json", b"{}") or b"{}")
     settings["activeSoundProfile"] = "MuseSounds"
