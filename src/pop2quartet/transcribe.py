@@ -115,6 +115,8 @@ FRAME = 0.02            # s per pitch-track frame (hop 320 at 16 kHz)
 FLICK = (0.04, 0.14)    # s: how long a quick turn away from the note lasts
 GRACE_WINDOW = 0.15     # s: a held neighbour note this close to the attack is a grace note
 ORNAMENT_EVERY = 16.0   # beats: at most one ornament per 4 bars, so they stay slight
+TRILL_EVERY = 64.0      # beats: at most one trill per 16 bars
+TRILL_REACH = 0.75      # semitones: a trill's flicks reach the neighbour (vibrato wobbles less)
 
 
 def sung_ornaments(vocals: Path, to_sec, tune: list[Note], tracker: str = "pyin",
@@ -126,6 +128,7 @@ def sung_ornaments(vocals: Path, to_sec, tune: list[Note], tracker: str = "pyin"
     Only notes of `min_len` beats or more, the clearest one per `every` beats."""
     times, midi, _ = _pitch_track(vocals, tracker)
     found: dict[int, tuple[float, int, tuple[str, int]]] = {}
+    last_trill = -TRILL_EVERY
     for i, n in enumerate(tune):
         if n.end - n.start < min_len:
             continue
@@ -148,12 +151,15 @@ def sung_ornaments(vocals: Path, to_sec, tune: list[Note], tracker: str = "pyin"
                 runs.append((k, j, int(step[k])))
             k = j
         # back and forth to a neighbour 3+ times in quick flicks: the voice is trilling
-        quick = [(k, j, st) for k, j, st in runs if FLICK[0] <= (j - k) * FRAME <= FLICK[1]]
+        # (each flick reaching the neighbour, not a wide vibrato wobbling toward it; and rarely)
+        quick = [(k, j, st) for k, j, st in runs if FLICK[0] <= (j - k) * FRAME <= FLICK[1]
+                 and np.nanmean(np.abs(d[k:j])) >= TRILL_REACH]
         for first in range(len(quick) - 2):
             group = quick[first:first + 3]
             same = len({st for _, _, st in group}) == 1
             close = all(b[0] - a[1] <= int(FLICK[1] / FRAME) for a, b in zip(group, group[1:]))
-            if same and close:
+            if same and close and n.start - last_trill >= TRILL_EVERY:
+                last_trill = n.start
                 slot = int(n.start // every)
                 found[slot] = (1.0, i, ("trill", group[0][2]))  # outranks a single flick
                 break
