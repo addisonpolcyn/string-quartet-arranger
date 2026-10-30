@@ -409,10 +409,14 @@ ENSEMBLES = {
              "vln2": ("Piano", "Piano", "167", -1.0, (21, 108)),
              "vla": ("Piano", "Piano", "167", -1.0, (21, 108)),
              "vc": ("Contrabass", "Bass", "95", 1.0, (28, 60))},
+    "swing": {"vln1": ("AltoSaxophone", "Alto Sax", "130", 2.0, (49, 81)),
+              "vln2": ("TenorSaxophone", "Tenor Sax", "131", -1.0, (44, 76)),
+              "vla": ("Piano", "Piano", "167", -2.0, (21, 108)),
+              "vc": ("Contrabass", "Bass", "95", 1.0, (28, 60))},
     "cuban_piano": {k: ("Piano", "Piano", "167", 2.0, (21, 108)) for k in ("vln1", "vln2", "vla", "vc")},
 }
-PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}, "bvsc": {"vc"}, "jazz": {"vc"}}
-SWING = {"jazz"}  # ensembles whose 8ths MuseScore plays swung  # parts plucked throughout
+PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}, "bvsc": {"vc"}, "jazz": {"vc"}, "swing": {"vc"}}
+SWING = {"jazz", "swing"}  # ensembles whose 8ths MuseScore plays swung  # parts plucked throughout
 ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
 ENSEMBLE_NAME = ["quartet"]
 
