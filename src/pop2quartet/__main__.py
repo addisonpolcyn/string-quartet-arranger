@@ -252,7 +252,7 @@ def main() -> None:
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
     ap.add_argument("--ensemble", choices=["quartet", "piano_trio", "woodwinds", "solo_piano", "cuban_charanga",
-                                           "cuban_strings", "cuban_piano"], default="quartet",
+                                           "cuban_strings", "cuban_piano", "bvsc"], default="quartet",
                     help="experiment: piano_trio (violin, piano, cello) or woodwinds (flute, oboe, "
                          "clarinet, bassoon) instead of the string quartet")
     ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
@@ -303,7 +303,7 @@ def main() -> None:
     if args.ensemble != "quartet":  # string techniques and the string bass don't apply
         args.tremolo_builds = args.mutes = args.double_bass = False
         args.harmonic_ending = args.harmonic_ending and args.ensemble == "piano_trio"
-    if args.ensemble in ("solo_piano", "cuban_piano", "cuban_charanga"):
+    if args.ensemble in ("solo_piano", "cuban_piano", "cuban_charanga", "bvsc"):
         args.lower_high = False  # the tune rides on top in the right hand / flute
         args.intonation = False  # pianos can't bend
         args.slides = False
@@ -389,7 +389,7 @@ def main() -> None:
         parts["vln2"] = pianist.under_tune(parts["vln1"], chords)
         print(f"[arrange] pianist: bass {len(parts['vc'])}, broken chord {len(parts['vla'])}, "
               f"harmony under the tune {len(parts['vln2'])} notes")
-    if args.ensemble.startswith("cuban"):  # the rhythm section comes from the chords, not the band
+    if args.ensemble.startswith("cuban") or args.ensemble == "bvsc":  # rhythm section from the chords
         from . import cuban
         total = max((n.end for ns in parts.values() for n in ns), default=4.0)
         parts["vc"] = cuban.tumbao(chords, total, 36 if args.ensemble == "cuban_piano" else 43)

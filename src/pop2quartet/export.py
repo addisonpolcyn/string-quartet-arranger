@@ -393,9 +393,15 @@ ENSEMBLES = {
                        "vln2": ("Piano", "Piano", "167", 2.0, (21, 108)),
                        "vla": ("Piano", "Piano", "167", 2.0, (21, 108))},
     "cuban_strings": {},
+    # Buena Vista Social Club: trumpet on the tune, guitar on the guajeo (the tres's figure), piano
+    # montuno, upright bass tumbao. uid None = MuseScore's own default sound for the instrument.
+    "bvsc": {"vln1": ("Trumpet", "Trumpet", None, 2.0, (54, 82)),
+             "vln2": ("AcousticGuitar", "Guitar", None, 0.0, (52, 76)),
+             "vla": ("Piano", "Piano", "167", 0.0, (21, 108)),
+             "vc": ("Contrabass", "Contrabass", "95", 0.0, (28, 60))},
     "cuban_piano": {k: ("Piano", "Piano", "167", 2.0, (21, 108)) for k in ("vln1", "vln2", "vla", "vc")},
 }
-PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}}  # parts plucked throughout
+PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}, "bvsc": {"vc"}}  # parts plucked throughout
 ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
 ENSEMBLE_NAME = ["quartet"]
 
@@ -540,12 +546,16 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
             if k in ENSEMBLE and i < len(settings["tracks"]):
                 _, name, uid, fader, _ = ENSEMBLE[k]
                 t = settings["tracks"][i]
+                if uid is None:  # let MuseScore choose its own sound for this instrument
+                    t["drop"] = True
+                    continue
                 meta = t["in"]["resourceMeta"]
                 meta["id"] = uid
                 meta["attributes"].update({"museUID": uid, "museName": name, "playbackSetupData": "",
                                            "museCategory": "", "musePack": ""})
                 t["instrumentId"] = ids[i].split(".")[-1] if i < len(ids) else t["instrumentId"]
                 t["out"]["volumeDb"] = fader + (boost[i] if i < len(boost) else 0.0)
+    settings["tracks"] = [t for t in settings["tracks"] if not t.pop("drop", False)]
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
     with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():
