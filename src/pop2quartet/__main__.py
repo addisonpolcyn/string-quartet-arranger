@@ -131,7 +131,7 @@ def main() -> None:
     ap.add_argument("--melody-min", type=float, default=0.5,
                     help="shortest tune note in beats; shorter turns fold into the note before "
                          "(0.25 keeps the singer's 16th-note turns)")
-    ap.add_argument("--breathe", type=float, default=1.0,
+    ap.add_argument("--breathe", type=float, default=0.0,
                     help="shortest tune note in the song's quietest third (by section), e.g. 1 = quarter "
                          "notes there and --melody-min in the middle third (0 = off)")
     ap.add_argument("--peak-min", type=float, default=0.0,
@@ -168,7 +168,7 @@ def main() -> None:
     ap.add_argument("--three-voice", type=float, default=0.3,
                     help="fraction of bars, the quietest ones, where the viola rests and the "
                          "texture thins to three voices (0 = always four)")
-    ap.add_argument("--bass-hold", type=float, default=4.0,
+    ap.add_argument("--bass-hold", type=float, default=1.0,
                     help="sustain cello notes through rests up to this many beats, like a "
                          "sustain pedal (e.g. 4 = ring through a bar; 0 = off)")
     ap.add_argument("--inner", choices=["auto", "groove", "pad", "pulse"], default="auto",
@@ -230,7 +230,7 @@ def main() -> None:
     ap.add_argument("--ride", choices=["flat", "song"], default="song",
                     help="preview only: the leveler evens the quartet out to one level (flat) or steers "
                          "it along the recording's loudness, so choruses keep their lift (song)")
-    ap.add_argument("--speed", type=float, default=0.95,
+    ap.add_argument("--speed", type=float, default=1.0,
                     help="play the quartet at this share of the recording's tempo (0.85 = 15%% slower)")
     ap.add_argument("--ride-amount", type=float, default=SONG_RIDE,
                     help="--ride song: how far the quartet follows the recording's loudness changes "
@@ -253,17 +253,19 @@ def main() -> None:
                          "descant, or rests")
     ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
                     help="a contrabass section doubles the cello an octave down in the song's loudest third")
+    ap.add_argument("--bass-boost", type=float, default=4.0,
+                    help="preview only: dB added to the double bass's fader (on top of its -6)")
     ap.add_argument("--mutes", action=argparse.BooleanOptionalAction, default=False,
                     help="violin I and cello play con sordino in the quietest third (Muse Strings solo instruments seem to ignore it)")
     ap.add_argument("--tremolo-builds", action=argparse.BooleanOptionalAction, default=True,
                     help="violin II and viola play tremolo in the 2 bars before each loudest section")
     ap.add_argument("--harmonic-ending", action=argparse.BooleanOptionalAction, default=True,
                     help="violin I plays the final note as a harmonic")
-    ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=True,
+    ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=False,
                     help="violin II / viola hold a note into the next chord and resolve down (once per 2 bars each)")
     ap.add_argument("--lead-boost", type=float, default=3.0,
                     help="preview only: dB added to violin I's fader (on top of its +6.5)")
-    ap.add_argument("--cello-boost", type=float, default=5.0,
+    ap.add_argument("--cello-boost", type=float, default=6.0,
                     help="preview only: dB added to the cello's fader (on top of its -4)")
     ap.add_argument("--lead-ahead", type=float, default=0.0,
                     help="preview only: if violin I sits less than this many dB over the other three "
@@ -397,7 +399,7 @@ def main() -> None:
         how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
                            [tunings[k] for k, *_ in PARTS] + ([[0.0] * len(parts["db"])] if parts.get("db") else [])
                            if tunings else None, onsets,
-                           (args.lead_boost, 0.0, 0.0, args.cello_boost), args.warm)
+                           (args.lead_boost, 0.0, 0.0, args.cello_boost, args.bass_boost), args.warm)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
