@@ -251,6 +251,8 @@ def main() -> None:
     ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
+    ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
+                    help="a contrabass section doubles the cello an octave down in the song's loudest third")
     ap.add_argument("--mutes", action=argparse.BooleanOptionalAction, default=False,
                     help="violin I and cello play con sordino in the quietest third (Muse Strings solo instruments seem to ignore it)")
     ap.add_argument("--tremolo-builds", action=argparse.BooleanOptionalAction, default=True,
@@ -358,6 +360,11 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    if args.double_bass:  # the contrabass section an octave under the cello in the loudest third
+        loud_spans = tier_spans(loudness_tiers(cand["loud"]), 2)
+        parts["db"] = [Note(n.start, n.end, n.pitch - 12 if n.pitch - 12 >= 28 else n.pitch, n.velocity)
+                       for n in parts["vc"] if any(a <= n.start < b for a, b in loud_spans)]
+        print(f"[arrange] double bass: {len(parts['db'])} notes in {len(loud_spans)} loud sections")
     colors = None
     if args.mutes or args.tremolo_builds or args.harmonic_ending:
         tiers = loudness_tiers(cand["loud"])
@@ -388,7 +395,8 @@ def main() -> None:
             onsets = [[(float(preview_seconds(n.start, tempo, marks)), i == 0 or n.start - ns[i - 1].end >= 0.5)
                        for i, n in enumerate(ns)] for ns in (parts[k] for k, *_ in PARTS)]
         how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
-                           [tunings[k] for k, *_ in PARTS] if tunings else None, onsets,
+                           [tunings[k] for k, *_ in PARTS] + ([[0.0] * len(parts["db"])] if parts.get("db") else [])
+                           if tunings else None, onsets,
                            (args.lead_boost, 0.0, 0.0, args.cello_boost), args.warm)
         bare.unlink()
         if how:

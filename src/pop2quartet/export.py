@@ -1,4 +1,5 @@
 """Stage 4: write the quartet as MusicXML (sheet music), MIDI, and a rough audio preview."""
+import bisect
 import contextlib
 import json
 import re
@@ -18,6 +19,7 @@ PARTS = [  # key, display name, GM program, clef
     ("vla", "Viola", 41, "alto"),
     ("vc", "Violoncello", 42, "bass"),
 ]
+BASS_PART = ("db", "Contrabass", 43, "bass")  # optional fifth part (--double-bass)
 MUSESCORE = [shutil.which("mscore4"), shutil.which("mscore"), shutil.which("musescore"),
              "/mnt/c/Program Files/MuseScore 4/bin/MuseScore4.exe"]  # last: Windows, via WSL
 SOUNDFONTS = ["/usr/share/sounds/sf2/FluidR3_GM.sf2", "/usr/share/soundfonts/FluidR3_GM.sf2"]
@@ -25,7 +27,7 @@ SOUNDFONTS = ["/usr/share/sounds/sf2/FluidR3_GM.sf2", "/usr/share/soundfonts/Flu
 
 LEVELS = ["pp", "p", "mp", "mf", "f"]
 COUNTER_VELOCITY = 0.35  # marks violin II's answers to the tune: written a level under its chords
-SOFTER = {"vln2": 1, "vla": 1}  # the accompaniment sits a dynamic level under the tune and bass
+SOFTER = {"vln2": 1, "vla": 1, "db": 1}  # the accompaniment sits a dynamic level under the tune and bass
 
 
 def level_at(plan, part: str, t: float) -> int:
@@ -78,7 +80,7 @@ def detect_key(parts: dict[str, list[Note]], slack: float = 0.02) -> tuple[str, 
     return best[1], best[2]
 
 
-DYNAMICS = {"vln1": "mf", "vln2": "p", "vla": "p", "vc": "mf"}  # notation players actually follow
+DYNAMICS = {"vln1": "mf", "vln2": "p", "vla": "p", "vc": "mf", "db": "mp"}  # notation players actually follow
 SHARP_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 SUFFIX = {"major": "", "minor": "m", "maj7": "maj7", "7": "7", "m7": "m7"}
 FLAT_NAMES = ["C", "D-", "D", "E-", "E", "F", "G-", "G", "A-", "A", "B-", "B"]
@@ -218,7 +220,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     from music21 import key as m21key
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
-                   "vla": instrument.Viola, "vc": instrument.Violoncello}
+                   "vla": instrument.Viola, "vc": instrument.Violoncello, "db": instrument.Contrabass}
     clefs = {"treble": clef.TrebleClef, "alto": clef.AltoClef, "bass": clef.BassClef}
 
     total = max((n.end for ns in parts.values() for n in ns), default=4.0)
@@ -238,8 +240,9 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     use_flats = detected.sharps < 0
 
     score = stream.Score()
+    score.atSoundingPitch = True
     score.metadata = metadata.Metadata(title=title, composer="arr. pop2quartet")
-    for k, name, _, clef_name in PARTS:
+    for k, name, _, clef_name in PARTS + ([BASS_PART] if parts.get("db") else []):
         part = stream.Part()
         inst = instruments[k]()
         inst.partName = name
@@ -373,6 +376,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 # Then where each sits (-1 = far left: the usual quartet half circle, the cello nearer the middle
 # as the bass carries the most energy) and its fader in dB: Muse Strings' cello sounds ~7 dB
 # louder than its violin at the same dynamic, so the cello comes down and the tune up, ~1.5 dB on top.
+# the Muse Strings contrabass section (no solo bass found): a soft floor under the quartet
+MUSE_BASS = ("contrabass", "95", "Contrabasses", "strings.contrabass.orchestral", 0.4, -6.0)
 MUSE_SOLOISTS = [
     ("violin", "103", "Violin 1 (Solo)", "strings.violin.orchestral:primary", -0.5, 6.5),
     ("violin", "104", "Violin 2 (Solo)", "strings.violin.orchestral:secondary", -0.2, 0.0),
@@ -422,14 +427,25 @@ def tune_notes(mscx: str, tunings: list[list[float]]) -> str:
         staff, cents = mscx[a:b], tunings[k] if k < len(tunings) else []
         notes = list(re.finditer(r"<Note>.*?</Note>", staff, re.S))
         tied = [bool(re.search(r'<Spanner type="Tie">\s*<prev>', m[0])) for m in notes]
-        if sum(not t for t in tied) != len(cents):
-            print(f"[export] intonation: staff {k + 1} has {sum(not t for t in tied)} notes, "
+        # grace notes (ornaments) aren't in the arrangement's notes: they take the next note's
+        # tuning instead of using one up
+        chords = [m.start() for m in re.finditer(r"<Chord>", staff)]
+        grace = []
+        for m in notes:
+            j = bisect.bisect_left(chords, m.start()) - 1
+            head = staff[chords[j]:m.start()] if j >= 0 else ""
+            grace.append("<acciaccatura/>" in head or "<appoggiatura/>" in head)
+        counted = sum(not t and not g for t, g in zip(tied, grace))
+        if counted != len(cents):
+            print(f"[export] intonation: staff {k + 1} has {counted} notes, "
                   f"expected {len(cents)}; left in equal temperament")
             out.append(staff)
             continue
         pieces, at, i, c = [], 0, -1, 0.0
-        for m, t in zip(notes, tied):
-            if not t:
+        for m, t, g in zip(notes, tied, grace):
+            if g:
+                c = cents[min(i + 1, len(cents) - 1)]
+            elif not t:
                 i += 1
                 c = cents[i]
             tuned = re.sub(r"(<pitch>\d+</pitch>)", rf"\1<tuning>{c:.1f}</tuning>", m[0], count=1)
@@ -457,6 +473,7 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
                 files[n].decode()).encode()
             if tunings:
                 files[n] = tune_notes(files[n].decode(), tunings).encode()
+    mscx_text = next((files[n].decode() for n in files if n.endswith(".mscx")), "")
     settings = json.loads(files.get("audiosettings.json", b"{}") or b"{}")
     settings["activeSoundProfile"] = "MuseSounds"
     settings["tracks"] = [{
@@ -466,9 +483,10 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
             "hasNativeEditorSupport": False, "id": uid, "type": "muse_sampler_sound_pack",
             "vendor": "MuseSounds"}, "unitConfiguration": {}},
         "instrumentId": instrument, "partId": str(i + 1),
-        "out": {"balance": pan, "fxChain": {}, "volumeDb": fader + boost[i]},
+        "out": {"balance": pan, "fxChain": {}, "volumeDb": fader + (boost[i] if i < len(boost) else 0.0)},
         "soloMuteState": {"mute": False, "solo": False},
-    } for i, (instrument, uid, name, setup, pan, fader) in enumerate(MUSE_SOLOISTS)]
+    } for i, (instrument, uid, name, setup, pan, fader) in enumerate(
+        MUSE_SOLOISTS + ([MUSE_BASS] if len(re.findall(r"<Part[ >]", mscx_text)) > len(MUSE_SOLOISTS) else []))]
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
     with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():
