@@ -318,6 +318,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                     wedge = dynamics.Crescendo if b > a else dynamics.Diminuendo
                     part.insert(0, wedge(span[0], span[-1]))
                     busy.append((max(s0, s1 - 8), s1))
+        if k in PIZZ.get(ENSEMBLE_NAME[0], ()):
+            part.insert(0, expressions.TextExpression("pizz."))
         if expression:
             notes = parts[k]
             plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") and k not in ENSEMBLE else set()
@@ -386,13 +388,22 @@ ENSEMBLES = {
                   "vln2": ("Oboe", "Oboe", "124", -1.0, (58, 93)),
                   "vla": ("Clarinet", "Clarinet in B\u266d", "127", 0.0, (50, 94)),
                   "vc": ("Bassoon", "Bassoon", "133", 0.0, (34, 76))},
+    "solo_piano": {k: ("Piano", "Piano", "167", 2.0, (21, 108)) for k in ("vln1", "vln2", "vla", "vc")},
+    "cuban_charanga": {"vln1": ("Flute", "Flute", "118", 4.0, (60, 96)),
+                       "vln2": ("Piano", "Piano", "167", 2.0, (21, 108)),
+                       "vla": ("Piano", "Piano", "167", 2.0, (21, 108))},
+    "cuban_strings": {},
+    "cuban_piano": {k: ("Piano", "Piano", "167", 2.0, (21, 108)) for k in ("vln1", "vln2", "vla", "vc")},
 }
+PIZZ = {"cuban_charanga": {"vc"}, "cuban_strings": {"vc"}}  # parts plucked throughout
 ENSEMBLE: dict = {}  # the active one (set_ensemble); empty = the string quartet
+ENSEMBLE_NAME = ["quartet"]
 
 
 def set_ensemble(name: str) -> None:
     ENSEMBLE.clear()
     ENSEMBLE.update(ENSEMBLES.get(name, {}))
+    ENSEMBLE_NAME[0] = name
     for k, v in ENSEMBLE.items():  # a piano is the harmony bed, not a backing voice: full level
         if v[0] == "Piano":
             SOFTER.pop(k, None)

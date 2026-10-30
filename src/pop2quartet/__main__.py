@@ -251,7 +251,8 @@ def main() -> None:
     ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
-    ap.add_argument("--ensemble", choices=["quartet", "piano_trio", "woodwinds"], default="quartet",
+    ap.add_argument("--ensemble", choices=["quartet", "piano_trio", "woodwinds", "solo_piano", "cuban_charanga",
+                                           "cuban_strings", "cuban_piano"], default="quartet",
                     help="experiment: piano_trio (violin, piano, cello) or woodwinds (flute, oboe, "
                          "clarinet, bassoon) instead of the string quartet")
     ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
@@ -302,6 +303,11 @@ def main() -> None:
     if args.ensemble != "quartet":  # string techniques and the string bass don't apply
         args.tremolo_builds = args.mutes = args.double_bass = False
         args.harmonic_ending = args.harmonic_ending and args.ensemble == "piano_trio"
+    if args.ensemble in ("solo_piano", "cuban_piano", "cuban_charanga"):
+        args.lower_high = False  # the tune rides on top in the right hand / flute
+        args.intonation = False  # pianos can't bend
+        args.slides = False
+        args.lead_boost = args.cello_boost = 0.0
     if args.ensemble == "piano_trio":
         args.intonation = False  # a piano can't bend; a violin tuned off it would clash
         args.lead_boost = args.cello_boost = 0.0  # three equals, not a quartet's soloist over a bed
@@ -375,6 +381,16 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    if args.ensemble.startswith("cuban"):  # the rhythm section comes from the chords, not the band
+        from . import cuban
+        total = max((n.end for ns in parts.values() for n in ns), default=4.0)
+        parts["vc"] = cuban.tumbao(chords, total, 36 if args.ensemble == "cuban_piano" else 43)
+        if args.ensemble == "cuban_strings":
+            parts["vln2"] = cuban.chacha(chords, total, 67, 1)
+            parts["vla"] = cuban.chacha(chords, total, 60, 2)
+        else:
+            parts["vln2"], parts["vla"] = cuban.montuno(chords, total, 67)  # under the tune
+        print(f"[arrange] cuban: tumbao {len(parts['vc'])} notes, {'cha-cha-cha strings' if args.ensemble == 'cuban_strings' else 'piano montuno'}")
     if args.ensemble != "quartet":
         from .export import ENSEMBLE, fold_into
         for k, (*_, (lo, hi)) in ENSEMBLE.items():
