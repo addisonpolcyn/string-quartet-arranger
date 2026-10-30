@@ -194,7 +194,8 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                    chords=(), plan=None, expression: bool = True, ending: bool = False,
                    accents: bool = False, rubato: bool = False, slides: bool = False,
                    tempo_marks: list | None = None, swells: bool = True, trills: bool = False,
-                   ornaments: dict | None = None, slide_max: int = SLIDE_LEAP[1]) -> str:
+                   ornaments: dict | None = None, slide_max: int = SLIDE_LEAP[1],
+                   colors: dict | None = None) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
     `expression`: slurs, pizzicato verses for the inner voices, and (with `swells`) a swell over
@@ -207,6 +208,9 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     singer would (see slide_notes).
     `tempo_marks`, if given, collects the hidden (beat, tempo factor) changes, to time the audio.
     `trills`: now and then violin I trills a long note that ends a sung phrase (see trill_notes).
+    `colors` (playing techniques by section): "mute": (start, end) beat spans where violin I and
+    the cello play con sordino; "trem": spans where violin II and viola play tremolo; "harm":
+    violin I's last note as a harmonic.
     `ornaments`: the singer's little turns on violin I, by note index (see sung_ornaments): a grace
     note from a neighbour, or an upper/lower mordent."""
     from music21 import (articulations, clef, dynamics, expressions, harmony, instrument, metadata,
@@ -275,6 +279,18 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
         if trills and k == "vln1":
             for i in trill_notes(parts[k], total, slide):
                 placed[i][1].expressions.append(expressions.Trill())
+        if colors:
+            if k in ("vln1", "vc"):
+                for a, b in colors.get("mute", ()):
+                    part.insert(a, expressions.TextExpression("con sord."))
+                    if b < total:
+                        part.insert(b, expressions.TextExpression("senza sord."))
+            if k in ("vln2", "vla"):
+                for n, (_, m) in zip(parts[k], placed):
+                    if n.end - n.start >= 0.5 and any(a <= n.start < b for a, b in colors.get("trem", ())):
+                        m.expressions.append(expressions.Tremolo(numberOfMarks=3))
+            if k == "vln1" and colors.get("harm") and placed:
+                part.insert(placed[-1][0], expressions.TextExpression("harm."))
         if ornaments and k == "vln1":
             for i, (kind, step) in ornaments.items():
                 if i in slide or i >= len(placed):
@@ -365,7 +381,8 @@ MUSE_SOLOISTS = [
 ]
 
 
-PLAYING = {"pizz.": "pizzicato", "arco": "normal"}  # MuseScore's playing-technique names
+PLAYING = {"pizz.": "pizzicato", "arco": "normal",  # MuseScore's playing-technique names
+           "con sord.": "mute", "senza sord.": "open", "harm.": "harmonics", "ord.": "normal"}
 
 
 INTONATION = {4: -10.0, 3: 8.0, 7: 2.0, 10: -8.0}  # cents, by interval above the chord's root:
@@ -433,7 +450,8 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
     for n in files:
         if n.endswith(".mscx"):
             files[n] = re.sub(
-                r"<StaffText>(\s*<eid>[^<]*</eid>)?\s*<text>(pizz\.|arco)</text>\s*</StaffText>",
+                r"<StaffText>(\s*<eid>[^<]*</eid>)?\s*<text>("
+                + "|".join(re.escape(k) for k in PLAYING) + r")</text>\s*</StaffText>",
                 lambda m: f"<PlayTechAnnotation>{m[1] or ''}<playTechType>{PLAYING[m[2]]}"
                           f"</playTechType><text>{m[2]}</text></PlayTechAnnotation>",
                 files[n].decode()).encode()

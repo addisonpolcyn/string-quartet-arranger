@@ -574,6 +574,10 @@ def _verse_after_chorus(plan) -> tuple[float, float] | None:
     return plan[k][0], end
 
 
+CELLO_SINGS_CENTRE = 62  # D4: the cello's tenor register, its most vocal
+CELLO_SINGS_TOP = 72     # C5: as high as the cello sings a tune comfortably
+
+
 def at_breaths(tune: list[Note], span: tuple[float, float], breath: float = 0.5,
                reach: float = 8.0) -> tuple[float, float]:
     """`span` with both edges moved to the nearest breath in the tune (a phrase starting after a
@@ -598,8 +602,9 @@ def cello_sings(parts: dict[str, list[Note]], span: tuple[float, float],
     tune = [n for n in parts["vln1"] if inside(n)]
     if not tune:
         return parts
-    lo, hi, _ = RANGES["vc"]
-    shift = 12 * round((57 - float(np.median([n.pitch for n in tune]))) / 12)  # centre on A3
+    lo, hi = RANGES["vc"][0], CELLO_SINGS_TOP
+    # the cello's singing register: the tune's median near D4, where it sounds most like a voice
+    shift = 12 * math.floor((CELLO_SINGS_CENTRE + 6 - float(np.median([n.pitch for n in tune]))) / 12)
     sung = []
     for n in tune:
         p = n.pitch + shift
@@ -723,6 +728,19 @@ def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
             p = min((q for q in range(p % 12, 128, 12) if lo <= q <= hi),
                     key=lambda q: abs(q - out[-1].pitch))
         out.append(Note(n.start, n.end, p, n.velocity))
+    return out
+
+
+def tier_spans(tiers, tier: int) -> list[tuple[float, float]]:
+    """(start, end) beats of each run of `tier` in loudness_tiers' per-bar tiers."""
+    out, k = [], 0
+    while k < len(tiers):
+        j = k
+        while j < len(tiers) and tiers[j] == tiers[k]:
+            j += 1
+        if tiers[k] == tier:
+            out.append((4.0 * k, 4.0 * j))
+        k = j
     return out
 
 

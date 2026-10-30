@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .arrange import LEVELS, arrange, cello_sings, loudness_tiers, second_verse, suspensions, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
+from .arrange import LEVELS, arrange, cello_sings, loudness_tiers, tier_spans, second_verse, suspensions, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
 from .export import (PARTS, RELEASE_LUFS, ROOMS, add_room, intonation, master_for_release,
                      phrase_arcs, preview_seconds, render_audio, room_for, write_midi, write_musicxml)
 from .quality import WEIGHTS, evaluate
@@ -251,6 +251,12 @@ def main() -> None:
     ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
+    ap.add_argument("--mutes", action=argparse.BooleanOptionalAction, default=False,
+                    help="violin I and cello play con sordino in the quietest third (Muse Strings solo instruments seem to ignore it)")
+    ap.add_argument("--tremolo-builds", action=argparse.BooleanOptionalAction, default=True,
+                    help="violin II and viola play tremolo in the 2 bars before each loudest section")
+    ap.add_argument("--harmonic-ending", action=argparse.BooleanOptionalAction, default=True,
+                    help="violin I plays the final note as a harmonic")
     ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=True,
                     help="violin II / viola hold a note into the next chord and resolve down (once per 2 bars each)")
     ap.add_argument("--lead-boost", type=float, default=3.0,
@@ -352,11 +358,20 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    colors = None
+    if args.mutes or args.tremolo_builds or args.harmonic_ending:
+        tiers = loudness_tiers(cand["loud"])
+        colors = {"mute": tier_spans(tiers, 0) if args.mutes else [],
+                  "trem": [(max(0.0, a - 8), a) for a, _ in tier_spans(tiers, 2)] if args.tremolo_builds else [],
+                  "harm": args.harmonic_ending}
+        print(f"[arrange] colours: {len(colors['mute'])} muted passages, {len(colors['trem'])} tremolo builds"
+              + (", harmonic ending" if colors["harm"] else ""))
+
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
     key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
                          args.expression, args.ending, args.accents, swells=args.swells != "off",
-                         trills=args.trills, ornaments=ornaments)
+                         trills=args.trills, ornaments=ornaments, colors=colors)
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
@@ -365,7 +380,8 @@ def main() -> None:
         marks = []
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
                        args.accents, args.rubato, args.slides, marks, args.swells == "score",
-                       trills=args.trills, ornaments=ornaments, slide_max=args.slide_max)
+                       trills=args.trills, ornaments=ornaments, slide_max=args.slide_max,
+                       colors=colors)
         tunings = intonation(parts, chords) if args.intonation else None
         onsets = None
         if args.timing == "notes":
