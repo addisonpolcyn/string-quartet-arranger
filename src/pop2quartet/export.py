@@ -30,10 +30,10 @@ COUNTER_VELOCITY = 0.35  # marks violin II's answers to the tune: written a leve
 SOFTER = {"vln2": 1, "vla": 1, "db": 1}  # the accompaniment sits a dynamic level under the tune and bass
 
 
-def level_at(plan, part: str, t: float) -> int:
+def level_at(plan, part: str, t: float, softer: dict | None = None) -> int:
     """LEVELS index for `part` at beat `t`, from (start beat, tune level) sections."""
     lv = next((lv for start, lv in reversed(plan) if start <= t), plan[0][1])
-    return max(0, lv - SOFTER.get(part, 0))
+    return max(0, lv - (SOFTER if softer is None else softer).get(part, 0))
 
 
 def write_midi(parts: dict[str, list[Note]], bpm: float, path: Path, plan=None) -> None:
@@ -196,7 +196,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                    chords=(), plan=None, expression: bool = True, ending: bool = False,
                    accents: bool = False, rubato: bool = False, slides: bool = False,
                    tempo_marks: list | None = None, swells: bool = True, trills: bool = False,
-                   ornaments: dict | None = None, slide_max: int = SLIDE_LEAP[1],
+                   ornaments: dict | None = None, slide_max: int = SLIDE_LEAP[1], ensemble=None,
                    colors: dict | None = None) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
@@ -221,6 +221,11 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
 
     instruments = {"vln1": instrument.Violin, "vln2": instrument.Violin,
                    "vla": instrument.Viola, "vc": instrument.Violoncello, "db": instrument.Contrabass}
+    voice = (lambda k: ensemble.part(k)) if ensemble else (lambda k: None)
+    for k in list(instruments):
+        if voice(k):
+            instruments[k] = getattr(instrument, voice(k).instrument)
+    softer = {k: v for k, v in SOFTER.items() if not (voice(k) and voice(k).full)}
     clefs = {"treble": clef.TrebleClef, "alto": clef.AltoClef, "bass": clef.BassClef}
 
     total = max((n.end for ns in parts.values() for n in ns), default=4.0)
@@ -245,7 +250,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     for k, name, _, clef_name in PARTS + ([BASS_PART] if parts.get("db") else []):
         part = stream.Part()
         inst = instruments[k]()
-        inst.partName = name
+        inst.partName = voice(k).name if voice(k) else name
         part.insert(0, inst)
         part.insert(0, clefs[clef_name]())
         part.insert(0, m21key.Key(detected.tonic.name, detected.mode))
@@ -253,7 +258,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
         if not plan:
             part.insert(0, dynamics.Dynamic(DYNAMICS[k]))
         else:
-            marks = [(start, LEVELS[level_at(plan, k, start)]) for start, _ in plan]
+            marks = [(start, LEVELS[level_at(plan, k, start, softer)]) for start, _ in plan]
             for i, (start, mark) in enumerate(marks):
                 if i == 0 or mark != marks[i - 1][1]:
                     part.insert(start, dynamics.Dynamic(mark))
@@ -311,15 +316,17 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
         busy = []  # beat spans of the section hairpins
         if plan:
             for (s0, _), (s1, _) in zip(plan, plan[1:]):
-                a, b = level_at(plan, k, s0), level_at(plan, k, s1)
+                a, b = level_at(plan, k, s0, softer), level_at(plan, k, s1, softer)
                 span = [m for t, m in placed if max(s0, s1 - 8) <= t < s1]
                 if a != b and len(span) >= 2:
                     wedge = dynamics.Crescendo if b > a else dynamics.Diminuendo
                     part.insert(0, wedge(span[0], span[-1]))
                     busy.append((max(s0, s1 - 8), s1))
+        if voice(k) and voice(k).pizz:
+            part.insert(0, expressions.TextExpression("pizz."))
         if expression:
             notes = parts[k]
-            plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") else set()
+            plucked = pizz_notes(notes, plan) if k in ("vln2", "vla") and not voice(k) else set()
             for i in sorted(plucked):  # mark where plucking starts and where the bow returns
                 if i - 1 not in plucked:
                     part.insert(notes[i].start, expressions.TextExpression("pizz."))
@@ -340,7 +347,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 j = i
                 while j + 1 < len(soft) and soft[j + 1]:
                     j += 1
-                lv = level_at(plan, k, n.start) if plan else LEVELS.index(DYNAMICS[k])
+                lv = level_at(plan, k, n.start, softer) if plan else LEVELS.index(DYNAMICS[k])
                 part.insert(n.start, dynamics.Dynamic(LEVELS[max(0, lv - 1)]))
                 if j + 1 < len(soft):
                     part.insert(parts[k][j + 1].start, dynamics.Dynamic(LEVELS[lv]))
@@ -456,7 +463,7 @@ def tune_notes(mscx: str, tunings: list[list[float]]) -> str:
 
 
 def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
-                    boost: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)) -> None:
+                    boost: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0), ensemble=None) -> None:
     """Set up a MuseScore project converted from our MusicXML: each part's player and seat
     (MUSE_SOLOISTS, parts 1-4 in score order), and "pizz."/"arco", which MusicXML import leaves
     as plain text, turned into playing techniques so the sound changes. `tunings`: cents per
@@ -487,6 +494,28 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
         "soloMuteState": {"mute": False, "solo": False},
     } for i, (instrument, uid, name, setup, pan, fader) in enumerate(
         MUSE_SOLOISTS + ([MUSE_BASS] if len(re.findall(r"<Part[ >]", mscx_text)) > len(MUSE_SOLOISTS) else []))]
+    if ensemble:  # other instruments: their Muse Sounds, or MuseScore's own default sound
+        ids = re.findall(r"<instrumentId>([^<]*)</instrumentId>", mscx_text)
+        keep = []
+        for i, t in enumerate(settings["tracks"]):
+            v = ensemble.part(PARTS[i][0]) if i < len(PARTS) else None
+            if v is None:
+                keep.append(t)
+                continue
+            if v.uid is None:
+                continue
+            if v.uid == t["in"]["resourceMeta"]["id"]:  # the same Muse Strings player: only its level
+                t["out"]["volumeDb"] = v.fader + (boost[i] if i < len(boost) else 0.0)
+                keep.append(t)
+                continue
+            meta = t["in"]["resourceMeta"]
+            meta["id"] = v.uid
+            meta["attributes"].update({"museUID": v.uid, "museName": v.name, "playbackSetupData": "",
+                                       "museCategory": "", "musePack": ""})
+            t["instrumentId"] = ids[i].split(".")[-1] if i < len(ids) else t["instrumentId"]
+            t["out"]["volumeDb"] = v.fader + (boost[i] if i < len(boost) else 0.0)
+            keep.append(t)
+        settings["tracks"] = keep
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
     with zipfile.ZipFile(mscz, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():
@@ -652,7 +681,7 @@ def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0, ons
 def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
                  lead_ahead: float = 0.0, tunings: list[list[float]] | None = None,
                  onsets=None, boost: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0),
-                 warm: bool = False) -> str | None:
+                 warm: bool = False, ensemble=None) -> str | None:
     """Render the preview: MuseScore plays the score (with Muse Sounds when installed, and it
     follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran.
     `humanize` (ms, MuseScore only): the players drift apart by up to this much, and with
@@ -670,7 +699,7 @@ def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
         # MuseScore renders in parallel fine: copies run at once render bit-identical audio
         made = subprocess.run([mscore, "-o", native(project), native(score)], capture_output=True)
         if made.returncode == 0 and project.exists():
-            prepare_project(project, tunings, boost)
+            prepare_project(project, tunings, boost, ensemble)
             score = project
         done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
         stems = []

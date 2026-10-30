@@ -251,6 +251,9 @@ def main() -> None:
     ap.add_argument("--cello-verse-violin", choices=["double", "descant", "rest"], default="double",
                     help="--cello-verse: violin I plays the tune an octave over the cello, holds a soft "
                          "descant, or rests")
+    ap.add_argument("--ensemble", choices=["quartet", "cuban_charanga", "bvsc"], default="quartet",
+                    help="who plays: the string quartet, a Cuban charanga (flute, piano, plucked cello) or "
+                         "a Buena Vista Social Club band (trumpet, guitar, piano, upright bass); see ensembles/")
     ap.add_argument("--double-bass", action=argparse.BooleanOptionalAction, default=True,
                     help="a contrabass section doubles the cello an octave down in the song's loudest third")
     ap.add_argument("--bass-boost", type=float, default=4.0,
@@ -294,6 +297,11 @@ def main() -> None:
                          "and slip on single notes (mostly entries), then find each other again")
     ap.add_argument("--no-render", action="store_true", help="skip the WAV preview")
     args = ap.parse_args()
+    from .ensembles import registry
+    ensemble = registry().get(args.ensemble)
+    if ensemble:
+        for k, v in ensemble.overrides.items():
+            setattr(args, k, v)
 
     out = args.out or Path("out") / args.audio.stem
     out.mkdir(parents=True, exist_ok=True)
@@ -362,6 +370,13 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    if ensemble:  # another band: its rhythm section, then every part into its instrument's range
+        if ensemble.accompany:
+            total = max((n.end for ns in parts.values() for n in ns), default=4.0)
+            parts = ensemble.accompany(parts, chords, total)
+        parts = ensemble.fold(parts)
+        print(f"[arrange] ensemble {ensemble.name}: "
+              + ", ".join(f"{role} = {v.name}" for role, v in ensemble.voices.items()))
     if args.double_bass:  # the contrabass section an octave under the cello in the loudest third
         loud_spans = tier_spans(loudness_tiers(cand["loud"]), 2)
         parts["db"] = [Note(n.start, n.end, n.pitch - 12 if n.pitch - 12 >= 28 else n.pitch, n.velocity)
@@ -380,7 +395,7 @@ def main() -> None:
     write_midi(parts, tempo, midi, plan)
     key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
                          args.expression, args.ending, args.accents, swells=args.swells != "off",
-                         trills=args.trills, ornaments=ornaments, colors=colors)
+                         trills=args.trills, ornaments=ornaments, colors=colors, ensemble=ensemble)
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
@@ -390,7 +405,7 @@ def main() -> None:
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
                        args.accents, args.rubato, args.slides, marks, args.swells == "score",
                        trills=args.trills, ornaments=ornaments, slide_max=args.slide_max,
-                       colors=colors)
+                       colors=colors, ensemble=ensemble)
         tunings = intonation(parts, chords) if args.intonation else None
         onsets = None
         if args.timing == "notes":
@@ -399,7 +414,8 @@ def main() -> None:
         how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
                            [tunings[k] for k, *_ in PARTS] + ([[0.0] * len(parts["db"])] if parts.get("db") else [])
                            if tunings else None, onsets,
-                           (args.lead_boost, 0.0, 0.0, args.cello_boost, args.bass_boost), args.warm)
+                           (args.lead_boost, 0.0, 0.0, args.cello_boost, args.bass_boost), args.warm,
+                           ensemble)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room

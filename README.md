@@ -203,3 +203,12 @@ on short clips of real songs with vocals from the free
   detection, inner-voice voice leading
 - `quality.py` – rule-based checks and the score `--auto` uses to pick settings
 - `export.py` – key detection, MusicXML (music21), MIDI, preview (MuseScore or fluidsynth)
+
+## Other ensembles
+
+`--ensemble cuban_charanga` (flute on the tune, piano montuno, plucked cello tumbao) or
+`--ensemble bvsc` (a Buena Vista Social Club band: trumpet, guitar guajeo, piano montuno,
+upright bass tumbao) keeps the tune and chords and writes a Cuban rhythm section from the
+chords. Ensembles live in `src/pop2quartet/ensembles/`, one file per style; the string quartet
+stays the default. A release list like `cuban.txt` names each song's ensemble per line:
+`<mp3 stem>|cuban/<folder>|--ensemble cuban_charanga`.
