@@ -8,13 +8,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .arrange import LEVELS, arrange, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
+from .arrange import LEVELS, arrange, cello_sings, loudness_tiers, second_verse, suspensions, bar_phase, dynamics_plan, first_chorus, lift_last_chorus
 from .export import (PARTS, RELEASE_LUFS, ROOMS, add_room, intonation, master_for_release,
                      phrase_arcs, preview_seconds, render_audio, room_for, write_midi, write_musicxml)
 from .quality import WEIGHTS, evaluate
 from .separate import separate
 from .transcribe import (Note, band_chroma, beat_loudness, chroma_repair, drum_activity, drum_pattern,
-                         refine_pitch, song_sections, sung_line, to_beats, track_beats, transcribe)
+                         refine_pitch, song_sections, sung_line, sung_ornaments, to_beats, track_beats,
+                         transcribe)
 
 
 def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
@@ -59,13 +60,28 @@ def build(args, raw, stems, beat_times, grid, slot, verbose=False) -> dict:
                             pattern=drum_pattern(stems["drums"], beat_times, offset),
                             repair=chroma_repair(stems["vocals"], to_sec) if raw["vocals"] else None,
                             sung=sung_line(stems["vocals"], to_sec, args.pitch) if args.melody == "best" else None,
-                            leap=args.leap_cost, root_fill=args.root_fill, counter=args.counter,
+                            leap=args.leap_cost, change=args.change_cost, melody_min=args.melody_min, bass_min=args.bass_min,
+                            breathe=args.breathe, peak=args.peak_min,
+                            tiers=loudness_tiers(loud) if args.breathe or args.peak_min else None, root_fill=args.root_fill, counter=args.counter,
                             repeat_gap=args.max_repeat * float(np.median(np.diff(beat_times))) ** -1
                             if args.max_repeat else 0.0,
                             sparse_until=first_chorus(plan) if args.vary else 0.0,
                             lower_high=args.lower_high, high_share=args.high_share,
                             harmony=band_chroma(stems["other"], stems["bass"], to_sec)
                             if args.chords == "audio" else None)
+    if args.cello_verse:
+        span = second_verse(plan, loudness_tiers(loud))
+        if span:
+            parts = cello_sings(parts, span)
+            if verbose:
+                print(f"[arrange] the cello sings the second verse: bars {int(span[0] // 4) + 1}-{int(span[1] // 4)}")
+    if args.suspensions:
+        made = 0
+        for k in ("vln2", "vla"):
+            parts[k], n = suspensions(parts[k], parts["vln1"])
+            made += n
+        if verbose:
+            print(f"[arrange] {made} suspensions: inner voices hold into the next chord, then resolve")
     if args.lift:
         parts, start = lift_last_chorus(parts, plan)
         if verbose and start >= 0:
@@ -109,6 +125,21 @@ def main() -> None:
     ap.add_argument("--leap-cost", type=float, default=0.15,
                     help="best melody: extra cost per semitone jumped between notes, so slips of a "
                          "4th, 5th or octave lose to stepwise motion (0 = off)")
+    ap.add_argument("--change-cost", type=float, default=0.5,
+                    help="best melody: cost of a new note in the middle of a sung syllable; lower "
+                         "follows more of the singer's turns, higher holds and repeats notes more")
+    ap.add_argument("--melody-min", type=float, default=0.5,
+                    help="shortest tune note in beats; shorter turns fold into the note before "
+                         "(0.25 keeps the singer's 16th-note turns)")
+    ap.add_argument("--breathe", type=float, default=1.0,
+                    help="shortest tune note in the song's quietest third (by section), e.g. 1 = quarter "
+                         "notes there and --melody-min in the middle third (0 = off)")
+    ap.add_argument("--peak-min", type=float, default=0.0,
+                    help="shortest tune note in the song's loudest third (by section), e.g. 0.25 = 16ths "
+                         "there; needs a 16th grid (--grid 0.25) (0 = off)")
+    ap.add_argument("--bass-min", type=float, default=0.5,
+                    help="shortest cello note in beats; quicker bass notes fold into the one before "
+                         "(0.25 keeps the bassist's 16th-note pickups)")
     ap.add_argument("--separator", default="htdemucs_ft",
                     help="Demucs model for the stems (htdemucs_ft: cleaner vocals; htdemucs: ~4x faster)")
     ap.add_argument("--bpm", type=float, help="override detected tempo (fixes half/double-time)")
@@ -181,7 +212,19 @@ def main() -> None:
                     help="first verse sparse (held chords, no answers), so later verses and choruses build")
     ap.add_argument("--slides", action=argparse.BooleanOptionalAction, default=True,
                     help="preview only: violin I slides up into a held note after a leap, like a singer")
-    ap.add_argument("--humanize", type=float, default=3.0,
+    ap.add_argument("--ornaments", action=argparse.BooleanOptionalAction, default=True,
+                    help="violin I copies the singer's little turns: a grace note where the voice "
+                         "flips in from a neighbour note, a mordent for a quick flick, a trill")
+    ap.add_argument("--grace", action=argparse.BooleanOptionalAction, default=True,
+                    help="--ornaments: include grace notes (--no-grace keeps only mordents and trills)")
+    ap.add_argument("--ornament-bars", type=float, default=4.0,
+                    help="--ornaments: at most one ornament per this many bars (2 = twice as many)")
+    ap.add_argument("--trills", action=argparse.BooleanOptionalAction, default=False,
+                    help="violin I trills a long note ending a sung phrase, at most once per 16 bars")
+    ap.add_argument("--slide-max", type=int, default=7,
+                    help="--slides: widest leap (semitones) violin I slides across (7 = a 5th; wider "
+                         "leaps are played clean)")
+    ap.add_argument("--humanize", type=float, default=0.0,
                     help="preview only: the four players drift apart by up to this many ms (MuseScore; "
                          "renders each part separately, so ~4x slower; 0 = off)")
     ap.add_argument("--ride", choices=["flat", "song"], default="song",
@@ -198,13 +241,26 @@ def main() -> None:
                          "Muse Sounds plays a full dynamic level (~6 dB) and buried the tune; off")
     ap.add_argument("--swell-db", type=float, default=SWELL_DB,
                     help="--swells mix: how far the quartet swells at a phrase's peak, in dB")
-    ap.add_argument("--lead-ahead", type=float, default=2.0,
+    ap.add_argument("--warm", action=argparse.BooleanOptionalAction, default=True,
+                    help="preview only: violin I EQ'd warmer and less nasal (renders violin I once more on "
+                         "its own, so ~2x slower)")
+    ap.add_argument("--warm-master", action=argparse.BooleanOptionalAction, default=False,
+                    help="preview only, with --master: keep more body (300 Hz), no added air, light tape saturation")
+    ap.add_argument("--cello-verse", action=argparse.BooleanOptionalAction, default=False,
+                    help="the cello sings the tune in the second verse; violin I rests and returns for the chorus")
+    ap.add_argument("--suspensions", action=argparse.BooleanOptionalAction, default=False,
+                    help="violin II / viola hold a note into the next chord and resolve down (once per 2 bars each)")
+    ap.add_argument("--lead-boost", type=float, default=3.0,
+                    help="preview only: dB added to violin I's fader (on top of its +6.5)")
+    ap.add_argument("--cello-boost", type=float, default=5.0,
+                    help="preview only: dB added to the cello's fader (on top of its -4)")
+    ap.add_argument("--lead-ahead", type=float, default=0.0,
                     help="preview only: if violin I sits less than this many dB over the other three "
                          "(a busy accompaniment), turn them down for the song to get it there (0 = off)")
     ap.add_argument("--lower-high", action=argparse.BooleanOptionalAction, default=True,
                     help="a tune spending 8%%+ of its time at A5 or above plays the whole song an "
                          "octave lower (violin II and its answers follow)")
-    ap.add_argument("--high-share", type=float, default=0.08,
+    ap.add_argument("--high-share", type=float, default=0.0,
                     help="--lower-high: share of the tune's time at A5+ that takes it down an octave "
                          "(0 = lower any tune that still fits on the violin)")
     ap.add_argument("--intonation", action=argparse.BooleanOptionalAction, default=True,
@@ -283,10 +339,21 @@ def main() -> None:
         tempo *= args.speed
         print(f"[export] played at {args.speed:.0%} of the recording's tempo: {tempo:.0f} BPM")
 
+    ornaments = None
+    if args.ornaments and parts["vln1"]:
+        ornaments = sung_ornaments(stems["vocals"], cand["to_sec"], parts["vln1"], args.pitch,
+                                   every=4 * args.ornament_bars)
+        if not args.grace:
+            ornaments = {i: o for i, o in ornaments.items() if o[0] != "grace"}
+        kinds = [k for k, _ in ornaments.values()]
+        print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
+              f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
+
     midi = out / "quartet.mid"
     write_midi(parts, tempo, midi, plan)
     key = write_musicxml(parts, tempo, out / "quartet.musicxml", args.audio.stem, chords, plan,
-                         args.expression, args.ending, args.accents, swells=args.swells != "off")
+                         args.expression, args.ending, args.accents, swells=args.swells != "off",
+                         trills=args.trills, ornaments=ornaments)
     print(f"[export] key: {key}")
     print(f"[export] {out / 'quartet.musicxml'}\n[export] {midi}")
     if not args.no_render:
@@ -294,14 +361,16 @@ def main() -> None:
         bare = out / ".preview.musicxml"
         marks = []
         write_musicxml(parts, tempo, bare, args.audio.stem, (), plan, args.expression, args.ending,
-                       args.accents, args.rubato, args.slides, marks, args.swells == "score")
+                       args.accents, args.rubato, args.slides, marks, args.swells == "score",
+                       trills=args.trills, ornaments=ornaments, slide_max=args.slide_max)
         tunings = intonation(parts, chords) if args.intonation else None
         onsets = None
         if args.timing == "notes":
             onsets = [[(float(preview_seconds(n.start, tempo, marks)), i == 0 or n.start - ns[i - 1].end >= 0.5)
                        for i, n in enumerate(ns)] for ns in (parts[k] for k, *_ in PARTS)]
         how = render_audio(bare, midi, out / "preview.wav", args.humanize, args.lead_ahead,
-                           [tunings[k] for k, *_ in PARTS] if tunings else None, onsets)
+                           [tunings[k] for k, *_ in PARTS] if tunings else None, onsets,
+                           (args.lead_boost, 0.0, 0.0, args.cello_boost), args.warm)
         bare.unlink()
         if how:
             room = room_for(drum_activity(stems["drums"])) if args.room == "auto" else args.room
@@ -311,7 +380,8 @@ def main() -> None:
                                              tempo, marks))
                        for a, p, b in phrase_arcs(tune, [])] if args.swells == "mix" else []
             add_room(out / "preview.wav", room, master=args.master, contour=contour, swells=phrases,
-                     swell_db=args.swell_db, irs=args.cache / "ir" if args.reverb == "real" else None)
+                     swell_db=args.swell_db, irs=args.cache / "ir" if args.reverb == "real" else None,
+                     warm_master=args.warm_master)
             level = ""
             if args.release:
                 lufs, peak = master_for_release(out / "preview.wav", out / "preview.wav", args.lufs)

@@ -70,15 +70,10 @@ def _crepe(y: np.ndarray, sr: int, hop: int) -> tuple[np.ndarray, np.ndarray]:
     import torch
     import torchcrepe
 
-    from .export import one_at_a_time
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    with one_at_a_time("gpu"):
-        f0, periodicity = torchcrepe.predict(torch.tensor(y[None], dtype=torch.float32), sr, hop, 80,
-                                             1200, "full", decoder=torchcrepe.decode.viterbi,
-                                             return_periodicity=True, batch_size=1024, device=device)
-        if device == "cuda":
-            torch.cuda.empty_cache()  # hand the memory back before the next song takes the GPU
+    f0, periodicity = torchcrepe.predict(torch.tensor(y[None], dtype=torch.float32), sr, hop, 80,
+                                         1200, "full", decoder=torchcrepe.decode.viterbi,
+                                         return_periodicity=True, batch_size=1024, device=device)
     periodicity = torchcrepe.filter.median(periodicity, 3)
     return f0[0].cpu().numpy(), periodicity[0].cpu().numpy()
 
@@ -114,6 +109,75 @@ def _pitch_track(path: Path, tracker: str = "pyin") -> tuple[np.ndarray, np.ndar
     tuning = float(np.angle(np.mean(np.exp(2j * np.pi * voiced))) / (2 * np.pi)) if len(voiced) else 0.0
     print(f"[transcribe] {path.stem}: tuned {tuning * 100:+.0f} cents from A440")
     return times, midi - tuning, tuning
+
+
+FRAME = 0.02            # s per pitch-track frame (hop 320 at 16 kHz)
+FLICK = (0.04, 0.14)    # s: how long a quick turn away from the note lasts
+GRACE_WINDOW = 0.15     # s: a held neighbour note this close to the attack is a grace note
+ORNAMENT_EVERY = 16.0   # beats: at most one ornament per 4 bars, so they stay slight
+
+
+def sung_ornaments(vocals: Path, to_sec, tune: list[Note], tracker: str = "pyin",
+                   min_len: float = 0.75, every: float = ORNAMENT_EVERY) -> dict[int, tuple[str, int]]:
+    """The singer's little turns that the notes smooth away, per tune note index:
+    ("grace", semitones) when the voice lands on a neighbour note first and steps onto the note,
+    ("upper"/"lower", 0) for a quick flick up or down and back within the note (a mordent),
+    ("trill", semitones) when it flicks to the same neighbour and back 3+ times.
+    Only notes of `min_len` beats or more, the clearest one per `every` beats."""
+    times, midi, _ = _pitch_track(vocals, tracker)
+    found: dict[int, tuple[float, int, tuple[str, int]]] = {}
+    for i, n in enumerate(tune):
+        if n.end - n.start < min_len:
+            continue
+        s, e = to_sec(n.start), to_sec(n.end)
+        a, b = np.searchsorted(times, [s - GRACE_WINDOW / 2, e])
+        seg = midi[a:b]
+        if len(seg) < 8 or np.mean(np.isnan(seg)) > 0.3:
+            continue
+        # distance from the written note, folded to the nearest octave (the tune may sit an
+        # octave or two from the voice)
+        d = (seg - n.pitch + 6) % 12 - 6
+        step = np.where(np.isnan(d), 0, np.round(d)).astype(int)
+        on = np.abs(d) < 0.5
+        runs, k = [], 0
+        while k < len(step):  # runs of frames on one neighbour note (1-2 semitones away)
+            j = k
+            while j < len(step) and step[j] == step[k]:
+                j += 1
+            if step[k] in (-2, -1, 1, 2):
+                runs.append((k, j, int(step[k])))
+            k = j
+        # back and forth to a neighbour 3+ times in quick flicks: the voice is trilling
+        quick = [(k, j, st) for k, j, st in runs if FLICK[0] <= (j - k) * FRAME <= FLICK[1]]
+        for first in range(len(quick) - 2):
+            group = quick[first:first + 3]
+            same = len({st for _, _, st in group}) == 1
+            close = all(b[0] - a[1] <= int(FLICK[1] / FRAME) for a, b in zip(group, group[1:]))
+            if same and close:
+                slot = int(n.start // every)
+                found[slot] = (1.0, i, ("trill", group[0][2]))  # outranks a single flick
+                break
+        else:
+            group = None
+        if group and found.get(int(n.start // every), (0, -1))[1] == i:
+            continue
+        for k, j, st in runs:
+            dur = (j - k) * FRAME
+            steady = np.nanstd(d[k:j]) < 0.35  # a held neighbour, not a glide through it
+            settled = on[j:j + 4].sum() >= 3   # and the voice comes back onto the note
+            if not (steady and settled and FLICK[0] <= dur):
+                continue
+            if times[a + k] < s + GRACE_WINDOW / 2 and dur <= GRACE_WINDOW + 0.05:
+                orn, strength = ("grace", st), dur
+            elif k > 0 and on[max(0, k - 3):k].sum() >= 2 and dur <= FLICK[1]:
+                orn, strength = ("upper" if st > 0 else "lower", 0), dur
+            else:
+                continue
+            slot = int(n.start // every)
+            if slot not in found or strength > found[slot][0]:
+                found[slot] = (strength, i, orn)
+            break
+    return {i: orn for _, i, orn in found.values()}
 
 
 @lru_cache(maxsize=2)

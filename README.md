@@ -113,7 +113,7 @@ different arrangement options takes seconds.
 | `--swells` | mix | a swell up to the top of each sung phrase: `mix` = the whole quartet together by `--swell-db` (1.5 dB) in the preview; `score` = violin I hairpins (Muse Sounds plays them ~6 dB, burying the tune); `off` |
 | `--ride` | song | preview only: the leveler steers the quartet along the recording's own loudness (20% of its range), so choruses keep their lift; `flat` evens everything to one level |
 | `--ride-amount` | 0.2 | `--ride song`: how far the quartet follows the recording's loudness changes (0 = as flat as possible) |
-| `--lead-ahead` | 2 | preview only: if violin I sits less than this many dB over the other three (a busy accompaniment), turn them down for the song to get it there, at most 8 dB |
+| `--lead-ahead` | 0 | preview only (renders each part separately, ~5x slower): if violin I sits less than this many dB over the other three (a busy accompaniment), turn them down for the song to get it there, at most 8 dB |
 | `--lower-high` / `--no-lower-high` | on | a tune spending 8% or more of its time at A5 or above plays the whole song an octave lower; violin II and its answers follow |
 | `--high-share` | 0.08 | `--lower-high`: share of the tune's time at A5+ that takes it down an octave; 0 lowers any tune that still fits on the violin |
 | `--intonation` / `--no-intonation` | on | preview only: tune notes the way a quartet does (major 3rds 10 cents low, minor 3rds 8 high, the tune's leading tone 10 sharp, ~4 cents of spread) instead of dead in tune |
@@ -122,7 +122,7 @@ different arrangement options takes seconds.
 | `--sections` | loudness | dynamics by loudness, or `repeats`: at detected sections, the loudest returning one as the chorus (experimental: found Boston's choruses, missed Save Your Tears') |
 | `--reverb` | real | preview only: rooms recorded in real spaces (impulse responses in `<cache>/ir`, see below), or `noise` |
 | `--timing` | notes | preview only, with `--humanize`: the players stay together and slip on single notes (mostly entries), then find each other again; `drift` = slow continuous drift |
-| `--humanize` | 3 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
+| `--humanize` | 0 | preview only: the four players drift apart by up to this many ms, so attacks don't land like one machine (MuseScore: renders each part separately, ~4x slower; 0 = off) |
 | `--speed` | 1.0 | play the quartet at this share of the recording's tempo (0.85 = 15% slower) |
 | `--vary` / `--no-vary` | on | first verse sparse (held chords, no answers), so later verses and choruses build |
 | `--slides` / `--no-slides` | on | preview only: violin I slides up into a held note after a leap, like a singer |

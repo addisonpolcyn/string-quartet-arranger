@@ -164,6 +164,7 @@ def chord_per_slot(harmony: list[Note], bass: list[Note], total: float, slot: fl
     return chords
 
 
+BASS_MIN = 0.5    # shortest cello note, in beats: the bassist's 16th-note pickups sound fussy
 MELODY_MIN = 0.5  # shortest melody note, in beats: 16th-note flickers sound nervous on a violin
 INNER_VELOCITY = 0.6  # the dynamics plan puts the accompaniment a level under (export.SOFTER)
 CHORDS = {  # quality -> intervals from the root; the 3rd is always second
@@ -369,7 +370,7 @@ def voice_inner(chords, melody, bass, slot, essentials=None, solo=None):
                 if all((pc - q) % 12 not in (1, 6, 11) for q in mel)}
 
         three = bool(solo and solo[k])
-        low = (lambda a, b: a) if three else (lambda a, b: b)  # lowest inner voice
+        low = lambda a, b: a if b is None else b  # lowest inner voice
 
         def missing(a, b):
             return len(need - held - {a % 12} - ({b % 12} if b is not None else set()))
@@ -404,7 +405,11 @@ def voice_inner(chords, melody, bass, slot, essentials=None, solo=None):
                 c += 100 * (a >= ceiling) + 100 * (low(a, b) <= floor)
                 return c
 
-            pairs = [(a, b) for a in cand2 for b in canda if b is None or b < a]
+            # never above the tune: with no room for two under it, violin II alone; with no
+            # room at all (a tune down on the G string), the inner voices rest
+            pairs = [(a, b) for a in cand2 for b in canda if (b is None or b < a) and a < ceiling]
+            if not pairs and not three:
+                pairs = [(a, None) for a in cand2 if a < ceiling]
             if not pairs:
                 continue
             a, b = min(pairs, key=lambda ab: cost(*ab))
@@ -537,6 +542,90 @@ def first_chorus(plan) -> float:
     return next(start for start, lv in plan if lv == top)
 
 
+def second_verse(plan, tiers=None) -> tuple[float, float] | None:
+    """(start, end) beats of the second verse: the first quieter section after the song first
+    reaches its loudest level, up to where it gets loud again. Songs without that shape (one long
+    level) fall back to the second run of 4+ bars in the song's quietest third (`tiers`)."""
+    span = _verse_after_chorus(plan)
+    if span or tiers is None:
+        return span
+    runs, k = [], 0
+    while k < len(tiers):
+        j = k
+        while j < len(tiers) and tiers[j] == tiers[k]:
+            j += 1
+        if tiers[k] == 0 and j - k >= 4:
+            runs.append((4.0 * k, 4.0 * j))
+        k = j
+    return runs[1] if len(runs) > 1 else None
+
+
+def _verse_after_chorus(plan) -> tuple[float, float] | None:
+    if not plan:
+        return None
+    top = max(lv for _, lv in plan)
+    k = next(i for i, (_, lv) in enumerate(plan) if lv == top)
+    k = next((i for i in range(k + 1, len(plan)) if plan[i][1] < top), None)
+    if k is None:
+        return None
+    end = next((plan[i][0] for i in range(k + 1, len(plan)) if plan[i][1] == top), None)
+    if end is None or end - plan[k][0] < 16:
+        return None
+    return plan[k][0], end
+
+
+def cello_sings(parts: dict[str, list[Note]], span: tuple[float, float]) -> dict[str, list[Note]]:
+    """The cello takes the tune for `span` (its singing register, around A3), violin I rests and
+    comes back with the tune after; violin II and viola keep their chords. The bass line drops out
+    for those bars, the cello now being the voice."""
+    s, e = span
+    inside = lambda n: s <= n.start < e
+    tune = [n for n in parts["vln1"] if inside(n)]
+    if not tune:
+        return parts
+    lo, hi, _ = RANGES["vc"]
+    shift = 12 * round((57 - float(np.median([n.pitch for n in tune]))) / 12)  # centre on A3
+    sung = []
+    for n in tune:
+        p = n.pitch + shift
+        while p > hi:
+            p -= 12
+        while p < lo:
+            p += 12
+        sung.append(Note(n.start, min(n.end, e), p, n.velocity))
+    out = dict(parts)
+    out["vln1"] = [n for n in parts["vln1"] if not inside(n)]
+    out["vc"] = sorted([n for n in parts["vc"] if not inside(n)] + sung, key=lambda n: n.start)
+    return out
+
+
+def suspensions(notes: list[Note], tune: list[Note], every: float = 8.0, hold: float = 1.0) -> tuple[list[Note], int]:
+    """Where an inner voice steps down a half or whole step into the next chord, it holds the old
+    note into the new chord for `hold` beats and then resolves (a 4-3 / 9-8 suspension), at most
+    once per `every` beats, and not where the held note would rub a half step against the tune."""
+    out, last, made = list(notes), -every, 0
+    for i in range(len(out) - 1):
+        a, b = out[i], out[i + 1]
+        if not (abs(a.end - b.start) < 1e-6 and 1 <= a.pitch - b.pitch <= 2 and b.start - last >= every):
+            continue
+        t = b.start
+        if any(m.start < t + hold and m.end > t and abs(m.pitch - a.pitch) % 12 in (1, 11) for m in tune):
+            continue
+        new = b.pitch
+        for j in range(i + 1, len(out)):  # the new chord's notes inside the held beat take the old pitch
+            n = out[j]
+            if n.start >= t + hold or n.pitch != new:
+                break
+            if n.end <= t + hold:
+                out[j] = Note(n.start, n.end, a.pitch, n.velocity)
+            else:  # split: the held part, then the resolution
+                out[j] = Note(n.start, t + hold, a.pitch, n.velocity)
+                out.insert(j + 1, Note(t + hold, n.end, new, n.velocity))
+                break
+        last, made = t, made + 1
+    return out, made
+
+
 def countermelody(melody: list[Note], hooks: list[Note], inner: list[Note], scale: set[int],
                   min_gap: float = 2.0, min_notes: int = 3, after: float = 0.0,
                   centre: int = 73) -> tuple[list[Note], int]:
@@ -588,6 +677,19 @@ def lower_if_high(notes: list[Note], part: str = "vln1",
             for n in notes], True
 
 
+def under_tune(notes: list[Note], tune: list[Note], part: str) -> list[Note]:
+    """Notes that would sound above the tune go down an octave, where the instrument has it."""
+    lo = RANGES[part][0]
+    out = []
+    for n in notes:
+        over = [m.pitch for m in tune if m.start < n.end and m.end > n.start]
+        p = n.pitch
+        while over and p >= min(over) and p - 12 >= lo:
+            p -= 12
+        out.append(Note(n.start, n.end, p, n.velocity))
+    return out
+
+
 def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
     """Undo octave errors: a leap of more than an octave goes to the nearest octave instead."""
     lo, hi, _ = RANGES[part]
@@ -601,14 +703,35 @@ def smooth_octaves(notes: list[Note], part: str) -> list[Note]:
     return out
 
 
-def simplify(notes: list[Note], min_len: float) -> list[Note]:
-    """Close rests shorter than `min_len` and fold notes shorter than it into the previous one."""
+def loudness_tiers(loud: np.ndarray, smooth: int = 4, min_run: int = 4) -> np.ndarray:
+    """Per bar: 0 = the song's quietest third, 1 = the middle, 2 = the loudest third, from the
+    recording's loudness per beat, smoothed over `smooth` bars. A tier lasting under `min_run`
+    bars joins the one before, so it changes between sections, not within a phrase."""
+    bars = np.array([loud[i:i + 4].mean() for i in range(0, len(loud) - 3, 4)]) if len(loud) >= 4 else np.zeros(1)
+    bars = np.convolve(bars, np.ones(smooth) / smooth, mode="same")
+    lo, hi = np.percentile(bars, [33, 67])
+    tier = np.where(bars <= lo, 0, np.where(bars >= hi, 2, 1))
+    k = 0
+    while k < len(tier):
+        j = k
+        while j < len(tier) and tier[j] == tier[k]:
+            j += 1
+        if j - k < min_run and k > 0:
+            tier[k:j] = tier[k - 1]
+        k = j
+    return tier
+
+
+def simplify(notes: list[Note], min_len) -> list[Note]:
+    """Close rests shorter than `min_len` and fold notes shorter than it into the previous one.
+    `min_len` is in beats, or a function of the beat (a different shortest note per section)."""
     out: list[Note] = []
     for n in notes:
-        if out and 0 < n.start - out[-1].end < min_len:
+        ml = min_len(n.start) if callable(min_len) else min_len
+        if out and 0 < n.start - out[-1].end < ml:
             out[-1] = Note(out[-1].start, n.start, out[-1].pitch, out[-1].velocity)
-        if out and out[-1].end == n.start and (n.end - n.start < min_len or n.pitch == out[-1].pitch
-                                                and out[-1].end - out[-1].start < min_len):
+        if out and out[-1].end == n.start and (n.end - n.start < ml or n.pitch == out[-1].pitch
+                                                and out[-1].end - out[-1].start < ml):
             out[-1] = Note(out[-1].start, n.end, out[-1].pitch, out[-1].velocity)
         else:
             out.append(n)
@@ -675,7 +798,8 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
             fill=False, melody_shift=None, bass_shift=None, min_note=0.25, hold_gap=1.5,
             tie_repeats=False, bass_hold=4.0, three_voice=0.3, pattern=None, repair=None, sung=None,
             leap=0.0, root_fill=False, counter=False, repeat_gap=0.0, sparse_until=0.0, harmony=None,
-            lower_high=False, high_share=HIGH_SHARE):
+            lower_high=False, high_share=HIGH_SHARE, change=MELODY_COST["change"],
+            melody_min=MELODY_MIN, bass_min=BASS_MIN, breathe=0.0, peak=0.0, tiers=None):
     """Returns (parts, chord changes as (beat, (root pitch class, quality))). With `sung` (from
     transcribe.sung_line), the tune comes from best_melody instead of the transcribed notes.
     Before beat `sparse_until` (the first verse) the inner voices hold their chords instead of
@@ -697,7 +821,7 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     hooks = monophonic(drop_harmonics(other), pick=lambda g: max(g, key=lambda n: n.pitch))
     if vocals and sung:
         melody = best_melody(*sung(total, grid), labels, harmony_slot, scale, grid,
-                             {**MELODY_COST, "leap": leap})
+                             {**MELODY_COST, "leap": leap, "change": change})
         print(f"[melody] best path through the sung pitch line: {len(melody)} notes")
     elif vocals:
         melody = monophonic(vocals, pick=lambda g: max(g, key=lambda n: n.velocity), legato_gap=grid)
@@ -711,8 +835,16 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
     cello = monophonic(bass, pick=lambda g: min(g, key=lambda n: n.pitch), legato_gap=grid)
     cello = fit_range(cello, "vc", bass_shift)
     if min_note:
-        melody = simplify(smooth_octaves(melody, "vln1"), max(min_note, MELODY_MIN))
-        cello = simplify(smooth_octaves(cello, "vc"), min_note)
+        base = max(min_note, melody_min)
+        if tiers is not None and (breathe or peak):  # by section: the song's quietest third
+            # breathes in longer notes, its loudest third keeps the singer's quicker turns
+            def shortest(t: float) -> float:
+                tier = tiers[min(len(tiers) - 1, max(0, int(t // 4)))]
+                return breathe if breathe and tier == 0 else peak if peak and tier == 2 else base
+            melody = simplify(smooth_octaves(melody, "vln1"), shortest)
+        else:
+            melody = simplify(smooth_octaves(melody, "vln1"), base)
+        cello = simplify(smooth_octaves(cello, "vc"), max(min_note, bass_min))
     if hold_gap:
         melody = hold(melody, hold_gap)
     if tie_repeats:
@@ -732,6 +864,7 @@ def arrange(vocals, bass, other, *, grid=0.25, harmony_slot=1.0, inner_style="au
         melody, lowered = lower_if_high(melody, share=high_share)
         if lowered:
             print("[arrange] the tune sits high: whole song taken down an octave")
+    cello = under_tune(cello, melody, "vc")
     if bass_hold:  # let the bass ring like a sustain pedal, released when the chord changes
         cello = merge_repeats(hold(cello, bass_hold, chords, harmony_slot))
     band = chord_per_slot(other, bass, total, harmony_slot)  # the band's 7ths, 9ths, ... too

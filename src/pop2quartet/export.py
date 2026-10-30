@@ -143,15 +143,16 @@ def phrase_arcs(notes: list[Note], busy: list[tuple[float, float]], breath: floa
 
 SLIDE = 0.25  # beats a slide takes, at the end of the note it leaves
 SLIDE_LEAP = (4, 12)  # semitones up: from a major 3rd to an octave
-SLIDE_EVERY = 8.0  # beats: at most one slide per two bars, so it stays a gesture
+SLIDE_EVERY = 16.0  # beats: at most one slide per four bars, so it stays a gesture
 
 
-def slide_notes(notes: list[Note]) -> set[int]:
+def slide_notes(notes: list[Note], widest: int = SLIDE_LEAP[1]) -> set[int]:
     """Indices of tune notes that slide up into the next one, the way a singer scoops: the next
-    note follows without a rest, a leap of SLIDE_LEAP up, both notes held a beat or more."""
+    note follows without a rest, a leap up of a major 3rd to `widest` semitones, both notes held
+    a beat or more."""
     out, last = set(), -SLIDE_EVERY
     for i, (a, b) in enumerate(zip(notes, notes[1:])):
-        if (abs(a.end - b.start) < 1e-6 and SLIDE_LEAP[0] <= b.pitch - a.pitch <= SLIDE_LEAP[1]
+        if (abs(a.end - b.start) < 1e-6 and SLIDE_LEAP[0] <= b.pitch - a.pitch <= widest
                 and a.end - a.start >= 1 and b.end - b.start >= 1 and a.start - last >= SLIDE_EVERY):
             out.add(i)
             last = a.start
@@ -171,10 +172,29 @@ def preview_seconds(beats, bpm: float, marks: list) -> np.ndarray:
     return np.interp(beats, at_b, at_t)
 
 
+TRILL_MIN = 2.0     # beats: only a note held this long gets a trill
+TRILL_EVERY = 64.0  # beats: at most one trill per 16 bars, so it stays an ornament
+
+
+def trill_notes(notes: list[Note], total: float, skip=frozenset()) -> list[int]:
+    """Tune notes to trill: the longest note ending a sung phrase in each 16-bar stretch, held at
+    least TRILL_MIN beats; not in the last 2 bars (the ending's fermata) or on a slide."""
+    best: dict[int, int] = {}
+    for _, _, b in phrase_arcs(notes, []):
+        n = notes[b]
+        if b in skip or n.end - n.start < TRILL_MIN or n.end > total - 8:
+            continue
+        k = int(n.start // TRILL_EVERY)
+        if k not in best or n.end - n.start > notes[best[k]].end - notes[best[k]].start:
+            best[k] = b
+    return sorted(best.values())
+
+
 def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: str,
                    chords=(), plan=None, expression: bool = True, ending: bool = False,
                    accents: bool = False, rubato: bool = False, slides: bool = False,
-                   tempo_marks: list | None = None, swells: bool = True) -> str:
+                   tempo_marks: list | None = None, swells: bool = True, trills: bool = False,
+                   ornaments: dict | None = None, slide_max: int = SLIDE_LEAP[1]) -> str:
     """`chords` are (beat, (root pitch class, quality)) changes, shown above violin I.
     `plan` is (start beat, LEVELS index) dynamic sections; changes get a 2-bar hairpin into them.
     `expression`: slurs, pizzicato verses for the inner voices, and (with `swells`) a swell over
@@ -185,7 +205,10 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
     little at the end of each sung phrase, as players breathe.
     `slides` (for the audio preview): violin I slides up into a held note after a leap, as a
     singer would (see slide_notes).
-    `tempo_marks`, if given, collects the hidden (beat, tempo factor) changes, to time the audio."""
+    `tempo_marks`, if given, collects the hidden (beat, tempo factor) changes, to time the audio.
+    `trills`: now and then violin I trills a long note that ends a sung phrase (see trill_notes).
+    `ornaments`: the singer's little turns on violin I, by note index (see sung_ornaments): a grace
+    note from a neighbour, or an upper/lower mordent."""
     from music21 import (articulations, clef, dynamics, expressions, harmony, instrument, metadata,
                          meter, note, spanner, stream, tempo, tie)
     from music21 import key as m21key
@@ -233,7 +256,7 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
             for beat, (root, quality) in chords:
                 part.insert(beat, harmony.ChordSymbol(names[root] + SUFFIX[quality]))
         placed, tails = [], {}
-        slide = slide_notes(parts[k]) if slides and k == "vln1" else set()
+        slide = slide_notes(parts[k], slide_max) if slides and k == "vln1" else set()
         for i, n in enumerate(parts[k]):
             # a slide is played on the note's last moment: Muse Sounds glides through the whole
             # note it starts on, so the slide starts on a short tied tail
@@ -249,6 +272,23 @@ def write_musicxml(parts: dict[str, list[Note]], bpm: float, path: Path, title: 
                 part.insert(n.start + head, tails[i])
         for i, tail in tails.items():
             part.insert(0, spanner.Glissando([tail, placed[i + 1][1]]))
+        if trills and k == "vln1":
+            for i in trill_notes(parts[k], total, slide):
+                placed[i][1].expressions.append(expressions.Trill())
+        if ornaments and k == "vln1":
+            for i, (kind, step) in ornaments.items():
+                if i in slide or i >= len(placed):
+                    continue
+                start, m = placed[i]
+                if kind == "grace":
+                    g = note.Note(m.pitch.midi + step).getGrace(appoggiatura=False)
+                    g.priority = -1  # sorts ahead of the note it leads into
+                    part.insert(start, g)
+                elif kind == "trill":
+                    m.expressions.append(expressions.Trill())
+                else:
+                    m.expressions.append(expressions.InvertedMordent() if kind == "upper"
+                                         else expressions.Mordent())
         busy = []  # beat spans of the section hairpins
         if plan:
             for (s0, _), (s1, _) in zip(plan, plan[1:]):
@@ -381,7 +421,8 @@ def tune_notes(mscx: str, tunings: list[list[float]]) -> str:
     return "".join(out)
 
 
-def prepare_project(mscz: Path, tunings: list[list[float]] | None = None) -> None:
+def prepare_project(mscz: Path, tunings: list[list[float]] | None = None,
+                    boost: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0)) -> None:
     """Set up a MuseScore project converted from our MusicXML: each part's player and seat
     (MUSE_SOLOISTS, parts 1-4 in score order), and "pizz."/"arco", which MusicXML import leaves
     as plain text, turned into playing techniques so the sound changes. `tunings`: cents per
@@ -406,7 +447,7 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None) -> Non
             "hasNativeEditorSupport": False, "id": uid, "type": "muse_sampler_sound_pack",
             "vendor": "MuseSounds"}, "unitConfiguration": {}},
         "instrumentId": instrument, "partId": str(i + 1),
-        "out": {"balance": pan, "fxChain": {}, "volumeDb": fader},
+        "out": {"balance": pan, "fxChain": {}, "volumeDb": fader + boost[i]},
         "soloMuteState": {"mute": False, "solo": False},
     } for i, (instrument, uid, name, setup, pan, fader) in enumerate(MUSE_SOLOISTS)]
     files["audiosettings.json"] = json.dumps(settings, indent=4).encode()
@@ -417,8 +458,7 @@ def prepare_project(mscz: Path, tunings: list[list[float]] | None = None) -> Non
 
 @contextlib.contextmanager
 def one_at_a_time(what: str = "musescore"):
-    """Several songs may convert at once, but MuseScore (a desktop app) renders one at a time,
-    and one song at a time uses the GPU (several CREPE models fill its memory and it crawls)."""
+    """Several songs may convert at once, but MuseScore (a desktop app) renders one at a time."""
     try:
         import fcntl
     except ImportError:  # Windows: no flock, and nothing to coordinate with
@@ -440,6 +480,27 @@ def solo_project(mscz: Path, dst: Path, part: int) -> None:
     with zipfile.ZipFile(dst, "w", zipfile.ZIP_DEFLATED) as z:
         for n, data in files.items():
             z.writestr(n, data)
+
+
+LEAD_EQ = (("peak", 1250, -4.0, 1.0),   # the nasal, honky band of a violin up high
+           ("peak", 350, 2.0, 0.8),     # body: the wood of the instrument
+           ("shelf", 6000, -2.0, 0.7))  # a softer edge
+
+
+def warm_lead(wav: Path, lead: Path) -> None:
+    """Swap violin I in the full render for an EQ'd copy (LEAD_EQ): the full render is the sum of
+    the parts rendered alone, so full - lead + EQ(lead) changes violin I and nothing else."""
+    import soundfile as sf
+    from scipy.signal import lfilter
+
+    y, sr = sf.read(str(wav), always_2d=True, dtype="float64")
+    x, _ = sf.read(str(lead), always_2d=True, dtype="float64")
+    n = min(len(y), len(x))
+    eq = x[:n]
+    for kind, f0, g, q in LEAD_EQ:
+        eq = lfilter(*_biquad(kind, f0, g, q, sr), eq, axis=0)
+    y[:n] += eq - x[:n]
+    sf.write(str(wav), y, sr, subtype="FLOAT")
 
 
 def fractional_read(x: np.ndarray, at: np.ndarray, taps: int = 32) -> np.ndarray:
@@ -553,7 +614,8 @@ def loosen(wav: Path, stems: list[Path], ms: float, lead_ahead: float = 0.0, ons
 
 def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
                  lead_ahead: float = 0.0, tunings: list[list[float]] | None = None,
-                 onsets=None) -> str | None:
+                 onsets=None, boost: tuple[float, ...] = (0.0, 0.0, 0.0, 0.0),
+                 warm: bool = False) -> str | None:
     """Render the preview: MuseScore plays the score (with Muse Sounds when installed, and it
     follows the dynamics), fluidsynth plays the MIDI as a fallback. Returns which one ran.
     `humanize` (ms, MuseScore only): the players drift apart by up to this much, and with
@@ -568,22 +630,31 @@ def render_audio(score: Path, midi: Path, wav: Path, humanize: float = 0.0,
                                   capture_output=True, text=True).stdout.strip()
         wav.unlink(missing_ok=True)  # so a stale preview can't pass for a fresh one
         project = score.with_suffix(".mscz")  # to choose each part's player (MUSE_SOLOISTS)
-        with one_at_a_time():
-            made = subprocess.run([mscore, "-o", native(project), native(score)], capture_output=True)
-            if made.returncode == 0 and project.exists():
-                prepare_project(project, tunings)
-                score = project
-            done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
-            stems = []
-            if (humanize or lead_ahead) and score == project and done.returncode == 0:
-                for k in range(len(MUSE_SOLOISTS)):
-                    solo, stem = project.with_name(f".solo{k}.mscz"), wav.with_name(f".{wav.stem}{k}.wav")
-                    solo_project(project, solo, k)
-                    subprocess.run([mscore, "-o", native(stem), native(solo)], capture_output=True)
-                    solo.unlink()
-                    stems.append(stem)
+        # MuseScore renders in parallel fine: copies run at once render bit-identical audio
+        made = subprocess.run([mscore, "-o", native(project), native(score)], capture_output=True)
+        if made.returncode == 0 and project.exists():
+            prepare_project(project, tunings, boost)
+            score = project
+        done = subprocess.run([mscore, "-o", native(wav), native(score)], capture_output=True)
+        stems = []
+        lead = wav.with_name(f".{wav.stem}_lead.wav")
+        if warm and not (humanize or lead_ahead) and score == project and done.returncode == 0:
+            solo = project.with_name(".solo_lead.mscz")
+            solo_project(project, solo, 0)
+            subprocess.run([mscore, "-o", native(lead), native(solo)], capture_output=True)
+            solo.unlink()
+        if (humanize or lead_ahead) and score == project and done.returncode == 0:
+            for k in range(len(MUSE_SOLOISTS)):
+                solo, stem = project.with_name(f".solo{k}.mscz"), wav.with_name(f".{wav.stem}{k}.wav")
+                solo_project(project, solo, k)
+                subprocess.run([mscore, "-o", native(stem), native(solo)], capture_output=True)
+                solo.unlink()
+                stems.append(stem)
         project.unlink(missing_ok=True)
         if done.returncode == 0 and wav.exists():
+            if lead.exists():
+                warm_lead(wav, lead)
+                lead.unlink()
             if stems and all(p.exists() for p in stems):
                 loosen(wav, stems, humanize, lead_ahead, onsets)
             for p in stems:
@@ -706,7 +777,8 @@ def room_response(room: str, sr: int, irs: Path | None) -> tuple[np.ndarray, flo
 
 
 def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: bool = False,
-             contour=None, swells=(), swell_db: float = 0.0, irs: Path | None = None) -> None:
+             contour=None, swells=(), swell_db: float = 0.0, irs: Path | None = None,
+             warm_master: bool = False) -> None:
     """Put the preview in a room (reverb: the recording convolved with a decaying, slightly dark
     noise echo per ear) and bring it to a steady listening level (RMS `level_db`, peaks < 0.95).
     `contour` ((seconds, dB) points): the loudness to follow instead of one level (ride_level).
@@ -745,8 +817,15 @@ def add_room(wav: Path, room: str = "studio", level_db: float = -20.0, master: b
     if master:  # less low-mid boxiness, less edge, a touch of air, and 2 dB louder with peaks rounded off
         # (the quartet has ~3x a pop mix's share of 2-6 kHz, where the ear is most sensitive, so it
         # sounded louder and harsher than its level; -3 dB at 3.5 kHz was preferred in an A/B)
-        for kind, f0, g, q in (("peak", 300, -2.5, 0.9), ("peak", 3500, -3.0, 0.8), ("shelf", 9000, 2.0, 0.7)):
+        eq = ((("peak", 300, -1.0, 0.9), ("peak", 3500, -3.0, 0.8)) if warm_master else
+              (("peak", 300, -2.5, 0.9), ("peak", 3500, -3.0, 0.8), ("shelf", 9000, 2.0, 0.7)))
+        for kind, f0, g, q in eq:
             out = lfilter(*_biquad(kind, f0, g, q, sr), out, axis=0)
+        if warm_master:  # keep the body (300 Hz), no added air, and a touch of tape: soft
+            # saturation adds low-order harmonics that read as warmth and fullness
+            peak = max(np.abs(out).max(), 1e-9)
+            drive = 1.8
+            out = np.tanh(drive * out / peak) / np.tanh(drive) * peak
         out *= 10 ** ((level_db + 2) / 20) / max(np.sqrt((out ** 2).mean()), 1e-9)
         out = np.where(np.abs(out) > 0.8, np.sign(out) * (0.8 + 0.19 * np.tanh((np.abs(out) - 0.8) / 0.19)), out)
         sf.write(str(wav), out, sr)
