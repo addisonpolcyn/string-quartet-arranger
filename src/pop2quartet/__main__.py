@@ -381,6 +381,14 @@ def main() -> None:
         print(f"[arrange] the singer's turns on violin I: {kinds.count('grace')} grace notes, "
               f"{kinds.count('upper') + kinds.count('lower')} mordents, {kinds.count('trill')} trills")
 
+    if args.ensemble == "solo_piano":  # play it like a pianist: full left hand, the tune in 3rds/6ths
+        from . import pianist
+        total = max((n.end for ns in parts.values() for n in ns), default=4.0)
+        parts["vc"] = pianist.bass(chords, total)
+        parts["vla"] = pianist.broken_chord(chords, total)
+        parts["vln2"] = pianist.under_tune(parts["vln1"], chords)
+        print(f"[arrange] pianist: bass {len(parts['vc'])}, broken chord {len(parts['vla'])}, "
+              f"harmony under the tune {len(parts['vln2'])} notes")
     if args.ensemble.startswith("cuban"):  # the rhythm section comes from the chords, not the band
         from . import cuban
         total = max((n.end for ns in parts.values() for n in ns), default=4.0)
